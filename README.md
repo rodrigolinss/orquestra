@@ -60,6 +60,8 @@ Running 3–4 AI agents in loose terminals turns you into a copy-paste router. O
 - **GitHub-ready** — open a local folder or paste `user/repo` and Orquestra clones and registers it. Private repos work with your existing git credentials.
 - **Shared notes protocol** — agents report progress, decisions, and blockers to markdown notes. When one writes `STATUS: CONCLUIDO` or `BLOQUEADO`, you get a native macOS notification.
 - **Built-in file inspector** — an optional sidebar (closed by default) to browse any agent's worktree and inspect recently modified files without leaving the app.
+- **Live token metering** — a status strip shows your current 5-hour session window (tokens, estimated API-equivalent value, reset time), today's total, and the model mix. Also available as `nvo usage`.
+- **Per-agent model selection** — run workers on Sonnet or Haiku for a fraction of Opus cost, straight from the new-agent dialog or `nvo new <name> "<task>" claude sonnet`.
 - **Nothing to babysit** — no daemon, no database. State is the filesystem; kill tmux and nothing is lost.
 
 ## Installation
@@ -111,7 +113,17 @@ nvo done builder                    # diff → typed confirmation → merge --no
 nvo kill reviewer                   # discard without merge (branch preserved)
 nvo attach                          # watch everything live in tmux
 nvo doctor                          # environment diagnosis
+nvo usage                           # token consumption: 5h window, day, models
 ```
+
+### Token efficiency
+
+Orquestra is designed to keep supervision cheap and spend visible:
+
+1. **Meter first** — the usage strip (or `nvo usage`) shows the 5-hour window and reset time, so you know your headroom before launching a team.
+2. **Right-size the model** — builders and reviewers rarely need the top model. Sonnet delivers most coding tasks at ~40% of Opus cost; Haiku handles mechanical work at ~20%.
+3. **Closed tasks burn less** — a scoped task ("implement X per docs/x.md, with tests") finishes in far fewer tokens than an open one ("improve the backend").
+4. **Notes over screens** — the maestro reads agent notes instead of re-reading terminal scrollback, keeping its own context small.
 
 ## Security model
 

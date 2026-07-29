@@ -64,8 +64,8 @@ enum AgentStatus: String {
     case trabalhando, concluido, bloqueado
     var color: Color {
         switch self {
-        case .trabalhando: return Color(red: 0.35, green: 0.65, blue: 1.0)
-        case .concluido: return Color(red: 0.30, green: 0.85, blue: 0.50)
+        case .trabalhando: return Color(red: 0.63, green: 0.63, blue: 0.67)  // cinza: em curso
+        case .concluido: return Color(red: 0.8, green: 1.0, blue: 0.0)       // verde nevoa
         case .bloqueado: return Color(red: 1.0, green: 0.42, blue: 0.42)
         }
     }
@@ -78,6 +78,22 @@ enum AgentStatus: String {
     }
 }
 
+struct UsageInfo: Equatable {
+    let blockActive: Bool
+    let blockTokens: Int
+    let blockCost: Double
+    let blockReset: String?
+    let todayTokens: Int
+    let todayCost: Double
+    let models: String
+
+    static func fmt(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1e6) }
+        if n >= 1_000 { return "\(n / 1000)k" }
+        return "\(n)"
+    }
+}
+
 struct AgentInfo: Identifiable, Equatable {
     let name: String
     var branch: String
@@ -85,6 +101,8 @@ struct AgentInfo: Identifiable, Equatable {
     var status: AgentStatus
     var pane: String
     var note: String
+    var cli: String = "claude"
+    var model: String = ""
     var id: String { name }
 }
 
@@ -96,9 +114,11 @@ final class Orchestra: ObservableObject {
     @Published var maestroRunning = false
     @Published var lastError: String?
     @Published var codexInstalled = false
+    @Published var usage: UsageInfo?
 
     private var lastStatus: [String: AgentStatus] = [:]
     private var timer: Timer?
+    private var usageTimer: Timer?
 
     init() {
         DispatchQueue.global().async {
@@ -106,8 +126,36 @@ final class Orchestra: ObservableObject {
             DispatchQueue.main.async { self.codexInstalled = found }
         }
         refresh()
+        refreshUsage()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.refresh()
+        }
+        usageTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.refreshUsage()
+        }
+    }
+
+    func refreshUsage() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let r = sh("/usr/bin/python3", ["\(ORQ)/bin/nvo-usage.py", "--json"], stdin: nil)
+            guard r.code == 0,
+                  let data = r.out.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return }
+            let block = obj["block"] as? [String: Any] ?? [:]
+            let today = obj["today"] as? [String: Any] ?? [:]
+            let models = (obj["models"] as? [[String: Any]] ?? []).prefix(3).map { m in
+                "\(m["name"] as? String ?? "?") \(Int(((m["share"] as? Double) ?? 0) * 100))%"
+            }
+            let info = UsageInfo(
+                blockActive: block["active"] as? Bool ?? false,
+                blockTokens: block["tokens"] as? Int ?? 0,
+                blockCost: block["cost"] as? Double ?? 0,
+                blockReset: block["reset"] as? String,
+                todayTokens: today["tokens"] as? Int ?? 0,
+                todayCost: today["cost"] as? Double ?? 0,
+                models: models.joined(separator: " · "))
+            DispatchQueue.main.async { self?.usage = info }
         }
     }
 
@@ -152,9 +200,18 @@ final class Orchestra: ObservableObject {
                     let status: AgentStatus =
                         (tail.contains("STATUS: CONCLUIDO") || tail.contains("STATUS: CONCLUÍDO")) ? .concluido :
                         (tail.contains("BLOQUEADO") || tail.contains("BLOQUEIO:")) ? .bloqueado : .trabalhando
+                    var cli = "claude", model = ""
+                    if let meta = try? String(contentsOfFile: "\(ORQ)/agents/\(proj)/\(name).meta",
+                                              encoding: .utf8) {
+                        for l in meta.split(separator: "\n") {
+                            if l.hasPrefix("cli=") { cli = String(l.dropFirst(4)) }
+                            if l.hasPrefix("model=") { model = String(l.dropFirst(6)) }
+                        }
+                    }
                     list.append(AgentInfo(name: name, branch: branch, changes: changes,
                                           status: status, pane: self.pane(name, lines: 12) ?? "(sem janela tmux)",
-                                          note: String(note.suffix(8000))))
+                                          note: String(note.suffix(8000)),
+                                          cli: cli, model: model))
                 }
             }
             let maestro = self.pane("maestro", lines: 40) ?? ""
@@ -198,9 +255,12 @@ final class Orchestra: ObservableObject {
         if r.code != 0 { DispatchQueue.main.async { self.lastError = r.err } }
     }
 
-    func newAgent(_ name: String, _ task: String, cli: String = "claude", done: @escaping (String?) -> Void) {
+    func newAgent(_ name: String, _ task: String, cli: String = "claude",
+                  model: String = "", done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            let r = sh(NVO, ["new", name, task, cli])
+            var args = ["new", name, task, cli]
+            if !model.isEmpty { args.append(model) }
+            let r = sh(NVO, args)
             DispatchQueue.main.async {
                 done(r.code == 0 ? nil : (r.err.isEmpty ? r.out : r.err))
                 self.refresh()
@@ -297,16 +357,17 @@ struct NodeAnchors: PreferenceKey {
 
 // MARK: - Tema
 
+// Paleta Nevoa AI, extraida do CSS de nevoaai.com:
+// #CCFF00 (accent), #09090B (bg), #131315/#1C1C1F (cards), #FAFAFA/#A1A1AA (texto)
 enum Theme {
-    static let bg = Color(red: 0.075, green: 0.08, blue: 0.10)
-    static let card = Color(red: 0.115, green: 0.125, blue: 0.155)
+    static let bg = Color(red: 0.035, green: 0.035, blue: 0.043)          // #09090B
+    static let card = Color(red: 0.075, green: 0.075, blue: 0.082)       // #131315
     static let cardBorder = Color.white.opacity(0.08)
-    static let terminalBg = Color(red: 0.05, green: 0.055, blue: 0.07)
-    static let text = Color(red: 0.88, green: 0.89, blue: 0.92)
-    static let dim = Color.white.opacity(0.45)
-    static let accent = Color(red: 0.98, green: 0.75, blue: 0.35)
-    static let cable = Color(red: 0.98, green: 0.75, blue: 0.35).opacity(0.35)
-    // verde da marca Nevoa AI (#CCFF00, extraido do CSS de nevoaai.com)
+    static let terminalBg = Color(red: 0.05, green: 0.05, blue: 0.055)   // #0D0D0F
+    static let text = Color(red: 0.98, green: 0.98, blue: 0.98)          // #FAFAFA
+    static let dim = Color(red: 0.63, green: 0.63, blue: 0.67)           // #A1A1AA
+    static let accent = Color(red: 0.8, green: 1.0, blue: 0.0)           // #CCFF00
+    static let cable = Color(red: 0.8, green: 1.0, blue: 0.0).opacity(0.3)
     static let nevoa = Color(red: 0.8, green: 1.0, blue: 0.0)
 }
 
@@ -440,7 +501,8 @@ struct AgentNode: View {
                 Text("\(agent.changes) arq.").font(.system(size: 9, design: .monospaced))
                     .foregroundColor(Theme.dim)
             }
-            Text(agent.branch).font(.system(size: 9, design: .monospaced)).foregroundColor(Theme.dim)
+            Text("\(agent.branch)  ·  \(agent.cli)\(agent.model.isEmpty ? "" : " · \(agent.model)")")
+                .font(.system(size: 9, design: .monospaced)).foregroundColor(Theme.dim)
             TerminalText(content: agent.pane).frame(height: 120)
             PromptField(placeholder: "prompt para \(agent.name)…") { t in
                 orch.sendAgent(agent.name, t)
@@ -663,6 +725,7 @@ struct NewAgentSheet: View {
     @State private var name = ""
     @State private var task = ""
     @State private var cli = "claude"
+    @State private var model = ""
     @State private var error: String?
     @State private var creating = false
     var body: some View {
@@ -676,6 +739,17 @@ struct NewAgentSheet: View {
                     Text("Codex").tag("codex")
                 }
                 .pickerStyle(.segmented)
+            }
+            if cli == "claude" {
+                Picker("", selection: $model) {
+                    Text("modelo padrão").tag("")
+                    Text("Sonnet — rápido e econômico").tag("sonnet")
+                    Text("Opus — máxima capacidade").tag("opus")
+                    Text("Haiku — ultra barato").tag("haiku")
+                }
+                .pickerStyle(.menu)
+                Text("dica: Sonnet resolve a maioria das tarefas de builder por ~40% do custo do Opus")
+                    .font(.system(size: 9)).foregroundColor(Theme.dim)
             }
             Text("Tarefa (seja específico: arquivo, critério de pronto, o que NÃO fazer)")
                 .font(.system(size: 10)).foregroundColor(Theme.dim)
@@ -697,7 +771,7 @@ struct NewAgentSheet: View {
                     let t = task.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !n.isEmpty, !t.isEmpty, !creating else { return }
                     creating = true
-                    orch.newAgent(n, t, cli: cli) { err in
+                    orch.newAgent(n, t, cli: cli, model: model) { err in
                         creating = false
                         if let err = err { error = err } else { dismiss() }
                     }
@@ -856,6 +930,31 @@ struct ContentView: View {
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             .background(Theme.card)
+
+            // medidor de tokens: sessao 5h do plano, dia e modelos
+            if let u = orch.usage {
+                HStack(spacing: 14) {
+                    Image(systemName: "bolt.fill").font(.system(size: 8))
+                        .foregroundColor(Theme.accent)
+                    if u.blockActive {
+                        Text("sessão: \(UsageInfo.fmt(u.blockTokens)) tok · ~$\(String(format: "%.2f", u.blockCost))")
+                        if let r = u.blockReset {
+                            Text("reseta \(r)").foregroundColor(Theme.accent.opacity(0.8))
+                        }
+                    } else {
+                        Text("sessão: sem atividade na janela de 5h")
+                    }
+                    Text("hoje: \(UsageInfo.fmt(u.todayTokens)) tok · ~$\(String(format: "%.2f", u.todayCost))")
+                    if !u.models.isEmpty { Text(u.models) }
+                    Spacer()
+                    Text("valores = equivalente API")
+                        .foregroundColor(Theme.dim.opacity(0.6))
+                }
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(Theme.dim)
+                .padding(.horizontal, 16).padding(.vertical, 5)
+                .background(Theme.card.opacity(0.6))
+            }
 
             Divider().background(Theme.cardBorder)
 

@@ -33,6 +33,7 @@ nvo — orquestrador local de agentes Claude Code
   nvo kill <nome>              encerra janela e remove worktree SEM merge
   nvo attach                   entra na sessao tmux "orquestra"
   nvo doctor                   diagnostica o ambiente (deps, login, hook)
+  nvo usage [--json]           consumo de tokens: sessao 5h, dia, modelos
 EOF
 }
 
@@ -79,12 +80,14 @@ cmd_init() {
 }
 
 cmd_new() {
-  [ $# -ge 2 ] || die 'uso: nvo new <nome> "<tarefa>" [claude|codex]'
-  local name="$1" task="$2" cli="${3:-$AGENT_CMD}"
+  [ $# -ge 2 ] || die 'uso: nvo new <nome> "<tarefa>" [claude|codex] [modelo]'
+  local name="$1" task="$2" cli="${3:-$AGENT_CMD}" model="${4:-}"
   case "$cli" in
     claude|codex|bash) ;;
     *) die "cli invalida '$cli' (use claude ou codex)" ;;
   esac
+  [ -z "$model" ] || printf '%s' "$model" | grep -Eq '^[A-Za-z0-9._-]+$' \
+    || die "modelo invalido '$model'"
   command -v "$cli" >/dev/null 2>&1 || die "'$cli' nao esta instalado (veja nvo doctor)"
   check_name "$name"
   load_project
@@ -104,7 +107,7 @@ cmd_new() {
   git -C "$REPO" worktree add -b "$branch" "$wt" "$base" >/dev/null
 
   meta="$(meta_path "$name")"
-  printf 'base=%s\ncli=%s\n' "$base" "$cli" > "$meta.meta"
+  printf 'base=%s\ncli=%s\nmodel=%s\n' "$base" "$cli" "$model" > "$meta.meta"
 
   note="$(note_path "$name")"
   [ -f "$note" ] || printf '# %s — %s\n\n' "$PROJ" "$name" > "$note"
@@ -131,9 +134,16 @@ EOF
 
   ensure_session
   tmux new-window -t "$SESSION" -n "$name" -c "$wt"
-  tmux send-keys -t "$SESSION:$name" "$cli \"\$(cat '$meta.prompt')\"" Enter
+  local launch="$cli"
+  if [ -n "$model" ]; then
+    case "$cli" in
+      claude) launch="claude --model $model" ;;
+      codex)  launch="codex -m $model" ;;
+    esac
+  fi
+  tmux send-keys -t "$SESSION:$name" "$launch \"\$(cat '$meta.prompt')\"" Enter
 
-  echo "agente '$name' criado ($cli)"
+  echo "agente '$name' criado ($cli${model:+ · $model})"
   echo "  branch:   $branch (base: $base)"
   echo "  worktree: $wt"
   echo "  notas:    $note"
@@ -359,6 +369,7 @@ case "${1:-}" in
   kill)   shift; cmd_kill "$@" ;;
   attach) shift; cmd_attach "$@" ;;
   doctor) shift; cmd_doctor "$@" ;;
+  usage)  shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "comando desconhecido: $1 (veja nvo --help)" ;;
 esac

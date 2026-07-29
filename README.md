@@ -7,170 +7,170 @@
 <h1 align="center">Orquestra</h1>
 
 <p align="center">
-  <strong>Run a team of AI coding agents on your Mac — isolated, supervised, and safe by design.</strong>
+  <strong>Rode um time de agentes de IA no seu Mac — isolados, supervisionados e seguros por construção.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-macOS-black?logo=apple" alt="macOS">
-  <img src="https://img.shields.io/badge/agents-Claude%20Code%20%C2%B7%20Codex-CCFF00" alt="Agents">
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
-  <img src="https://img.shields.io/badge/built%20with-SwiftUI%20%2B%20Bash-orange" alt="Stack">
+  <img src="https://img.shields.io/badge/plataforma-macOS-black?logo=apple" alt="macOS">
+  <img src="https://img.shields.io/badge/agentes-Claude%20Code%20%C2%B7%20Codex-CCFF00" alt="Agentes">
+  <img src="https://img.shields.io/badge/licen%C3%A7a-MIT-blue" alt="MIT">
+  <img src="https://img.shields.io/badge/feito%20com-SwiftUI%20%2B%20Bash-orange" alt="Stack">
 </p>
 
 <p align="center">
-  <a href="#installation">Installation</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#usage">Usage</a> ·
-  <a href="#security-model">Security</a> ·
-  <a href="#architecture">Architecture</a>
+  <a href="#instalação">Instalação</a> ·
+  <a href="#por-que-orquestra">Por que</a> ·
+  <a href="#uso">Uso</a> ·
+  <a href="#modelo-de-segurança">Segurança</a> ·
+  <a href="#arquitetura">Arquitetura</a>
 </p>
 
 ---
 
-Orquestra turns your machine into a supervised AI engineering team. A **maestro** agent takes your instructions in plain language and recruits worker agents — each one locked inside its own git worktree and branch, watched by a deterministic command firewall, and merged back **only** with your explicit, typed approval.
+O Orquestra transforma sua máquina em um time de engenharia de IA supervisionado. Um agente **maestro** recebe suas instruções em linguagem natural e recruta agentes trabalhadores — cada um trancado dentro do próprio git worktree e da própria branch, vigiado por um firewall determinístico de comandos, e integrado de volta **apenas** com a sua aprovação explícita, digitada.
 
-No copy-pasting between terminals. No agent ever touching your main branch. No "oops" moments.
+Sem ficar copiando e colando entre terminais. Sem nenhum agente encostando na sua branch principal. Sem momentos "ops".
 
 ```
                     ┌─────────────┐
-                    │   MAESTRO   │  ← you talk to it in plain language
+                    │   MAESTRO   │  ← você fala com ele em linguagem natural
                     └──────┬──────┘
              ┌─────────────┼─────────────┐
         ┌────┴────┐   ┌────┴────┐   ┌────┴────┐
-        │ builder │   │reviewer │   │  docs   │  ← each in its own worktree,
-        └─────────┘   └─────────┘   └─────────┘     branch agent/<name>
-                  shared notes = progress protocol
+        │ builder │   │reviewer │   │  docs   │  ← cada um no seu worktree,
+        └─────────┘   └─────────┘   └─────────┘     branch agent/<nome>
+                 notas compartilhadas = protocolo de progresso
 ```
 
-## Why Orquestra
+## Por que Orquestra
 
-Running 3–4 AI agents in loose terminals turns you into a copy-paste router. Orquestra fixes that with three architectural decisions:
+Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de copy-paste. O Orquestra resolve isso com três decisões de arquitetura:
 
-| | Decision | Result |
+| | Decisão | Resultado |
 |---|---|---|
-| 🗂 | **Isolation lives in the filesystem, not the prompt** | Each agent only sees its own worktree. A confused agent can't break another agent's work — or your main branch. |
-| 🛡 | **Deterministic guardrails** | A `PreToolUse` hook blocks destructive commands *before* they run. It doesn't depend on the model having a good day. |
-| ✍️ | **Merging is a human decision** | `nvo done` shows the full diff and requires you to type the agent's name. There is no auto-merge. Ever. |
+| 🗂 | **O isolamento mora no sistema de arquivos, não no prompt** | Cada agente só enxerga o próprio worktree. Um agente confuso não consegue quebrar o trabalho de outro — nem a sua branch principal. |
+| 🛡 | **Barreiras determinísticas** | Um hook `PreToolUse` bloqueia comandos destrutivos *antes* que eles rodem. Não depende do modelo estar num dia bom. |
+| ✍️ | **Integrar é decisão humana** | O `nvo done` mostra o diff completo e exige que você digite o nome do agente. Não existe merge automático. Nunca. |
 
-## Features
+## Recursos
 
-- **Native macOS app** — visual canvas with the maestro on top and live agent cards wired below it. Status, terminal output, notes, and diffs at a glance.
-- **Works with Claude Code and Codex** — pick the harness per agent. Mixed teams (Claude builder + Codex reviewer) work out of the box.
-- **Zero-credential setup** — the installer detects what you already have. Claude/Codex already logged in? Git already configured? Orquestra just uses it.
-- **GitHub-ready** — open a local folder or paste `user/repo` and Orquestra clones and registers it. Private repos work with your existing git credentials.
-- **Shared notes protocol** — agents report progress, decisions, and blockers to markdown notes. When one writes `STATUS: CONCLUIDO` or `BLOQUEADO`, you get a native macOS notification.
-- **Built-in file inspector** — an optional sidebar (closed by default) to browse any agent's worktree and inspect recently modified files without leaving the app.
-- **Live token metering** — a status strip shows your current 5-hour session window (tokens, estimated API-equivalent value, reset time), today's total, and the model mix. Also available as `nvo usage`.
-- **Per-agent model selection** — run workers on Sonnet or Haiku for a fraction of Opus cost, straight from the new-agent dialog or `nvo new <name> "<task>" claude sonnet`.
-- **Nothing to babysit** — no daemon, no database. State is the filesystem; kill tmux and nothing is lost.
+- **App nativo para macOS** — canvas visual com o maestro no topo e os cards dos agentes conectados abaixo dele. Status, saída do terminal, notas e diffs num relance.
+- **Funciona com Claude Code e Codex** — escolha o harness por agente. Times mistos (builder no Claude + reviewer no Codex) funcionam de imediato.
+- **Instalação sem credenciais** — o instalador detecta o que você já tem. Claude/Codex já logados? Git já configurado? O Orquestra simplesmente aproveita.
+- **Pronto para GitHub** — abra uma pasta local ou cole `usuario/repo` e o Orquestra clona e registra. Repositórios privados funcionam com suas credenciais git existentes.
+- **Protocolo de notas compartilhadas** — os agentes reportam progresso, decisões e bloqueios em notas markdown. Quando um escreve `STATUS: CONCLUIDO` ou `BLOQUEADO`, você recebe uma notificação nativa do macOS.
+- **Inspetor de arquivos embutido** — uma barra lateral opcional (fechada por padrão) para navegar pelo worktree de qualquer agente e inspecionar arquivos modificados recentemente sem sair do app.
+- **Medição de tokens ao vivo** — uma faixa de status mostra a janela de sessão de 5 horas atual (tokens, valor equivalente em API, horário de reset), o total do dia e a distribuição por modelo. Também disponível como `nvo usage`.
+- **Escolha de modelo por agente** — rode trabalhadores em Sonnet ou Haiku por uma fração do custo do Opus, direto no diálogo de novo agente ou com `nvo new <nome> "<tarefa>" claude sonnet`.
+- **Nada para babá** — sem daemon, sem banco de dados. O estado é o sistema de arquivos; mate o tmux e nada se perde.
 
-## Installation
+## Instalação
 
-**Requirements:** macOS with [Homebrew](https://brew.sh). At least one agent CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex)) installed and logged in.
+**Requisitos:** macOS com [Homebrew](https://brew.sh). Pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada.
 
 ```bash
 git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
 cd ~/orquestra && ./install.sh
 ```
 
-The installer is idempotent and only fills the gaps: installs `tmux`/`jq` if missing, wires the security hook, adds the CLI to your `PATH`, and builds the native app when Xcode Command Line Tools are present. It ends with a full environment diagnosis:
+O instalador é idempotente e só preenche as lacunas: instala `tmux`/`jq` se faltarem, conecta o hook de segurança, adiciona a CLI ao seu `PATH` e compila o app nativo quando as Xcode Command Line Tools estão presentes. Ao final, faz um diagnóstico completo do ambiente:
 
 ```
-nvo doctor — environment check
+nvo doctor — verificação do ambiente
   ✓ tmux 3.7b
-  ✓ git 2.50 · identity configured
-  ✓ Claude Code installed — existing login will be used
-  ✓ Codex CLI installed
-  ✓ security hook configured
-  ✓ Orquestra.app installed
-ready to orchestrate.
+  ✓ git 2.50 · identidade configurada
+  ✓ Claude Code instalado — o login existente será usado
+  ✓ Codex CLI instalado
+  ✓ hook de segurança configurado
+  ✓ Orquestra.app instalado
+pronto para orquestrar.
 ```
 
-## Usage
+## Uso
 
-### The app
+### O app
 
-Open **Orquestra** (Spotlight → "Orquestra"). Pick a project — a local folder or a GitHub repo — then start the maestro and tell it what you want:
+Abra o **Orquestra** (Spotlight → "Orquestra"). Escolha um projeto — uma pasta local ou um repositório do GitHub — depois inicie o maestro e diga o que você quer:
 
-> *"create a builder agent to implement the payment webhook from docs/webhook.md, and a reviewer to audit it. Let me know when both finish."*
+> *"cria um agente builder pra implementar o webhook de pagamento do docs/webhook.md, e um reviewer pra auditar. Me avisa quando os dois terminarem."*
 
-Each agent appears as a live card wired to the maestro: status, terminal output, direct prompt field, notes, and diff. When an agent finishes or gets stuck, macOS notifies you.
+Cada agente aparece como um card ao vivo conectado ao maestro: status, saída do terminal, campo de prompt direto, notas e diff. Quando um agente termina ou trava, o macOS te notifica.
 
-### The CLI
+### A CLI
 
-Everything the app does, scriptable:
+Tudo o que o app faz, de forma scriptável:
 
 ```bash
-nvo init ~/projects/my-api          # register the active project
-nvo new builder "implement X"       # branch + worktree + tmux window + agent
-nvo new reviewer "audit it" codex   # same, but running on Codex
-nvo ls                              # overview of every agent
-nvo read builder 60                 # peek at an agent's screen, non-intrusive
-nvo send builder "prioritize retry" # send a prompt
-nvo note builder                    # read its progress notes
-nvo diff builder                    # review its work against the base branch
-nvo done builder                    # diff → typed confirmation → merge --no-ff
-nvo kill reviewer                   # discard without merge (branch preserved)
-nvo attach                          # watch everything live in tmux
-nvo doctor                          # environment diagnosis
-nvo usage                           # token consumption: 5h window, day, models
+nvo init ~/projetos/minha-api         # registra o projeto ativo
+nvo new builder "implementa X"        # branch + worktree + janela tmux + agente
+nvo new reviewer "audita isso" codex  # o mesmo, mas rodando no Codex
+nvo ls                                # visão geral de todos os agentes
+nvo read builder 60                   # espia a tela de um agente, sem interferir
+nvo send builder "prioriza o retry"   # envia um prompt
+nvo note builder                      # lê as notas de progresso dele
+nvo diff builder                      # revisa o trabalho contra a branch base
+nvo done builder                      # diff → confirmação digitada → merge --no-ff
+nvo kill reviewer                     # descarta sem merge (a branch é preservada)
+nvo attach                            # acompanha tudo ao vivo no tmux
+nvo doctor                            # diagnóstico do ambiente
+nvo usage                             # consumo de tokens: janela de 5h, dia, modelos
 ```
 
-### Token efficiency
+### Eficiência de tokens
 
-Orquestra is designed to keep supervision cheap and spend visible:
+O Orquestra é desenhado para manter a supervisão barata e o gasto visível:
 
-1. **Meter first** — the usage strip (or `nvo usage`) shows the 5-hour window and reset time, so you know your headroom before launching a team.
-2. **Right-size the model** — builders and reviewers rarely need the top model. Sonnet delivers most coding tasks at ~40% of Opus cost; Haiku handles mechanical work at ~20%.
-3. **Closed tasks burn less** — a scoped task ("implement X per docs/x.md, with tests") finishes in far fewer tokens than an open one ("improve the backend").
-4. **Notes over screens** — the maestro reads agent notes instead of re-reading terminal scrollback, keeping its own context small.
+1. **Meça antes** — a faixa de uso (ou `nvo usage`) mostra a janela de 5 horas e o horário de reset, então você sabe sua folga antes de lançar um time.
+2. **Dimensione o modelo** — builders e reviewers raramente precisam do modelo topo de linha. O Sonnet entrega a maior parte das tarefas de código a ~40% do custo do Opus; o Haiku dá conta do trabalho mecânico a ~20%.
+3. **Tarefas fechadas gastam menos** — uma tarefa delimitada ("implementa X conforme docs/x.md, com testes") termina com muito menos tokens do que uma aberta ("melhora o backend").
+4. **Notas em vez de telas** — o maestro lê as notas dos agentes em vez de reler o scrollback do terminal, mantendo o próprio contexto pequeno.
 
-## Security model
+## Modelo de segurança
 
-Orquestra assumes agents *will* misbehave eventually, and makes that survivable:
+O Orquestra parte do princípio de que os agentes *vão* se comportar mal em algum momento, e torna isso sobrevivível:
 
-| Layer | Enforcement |
+| Camada | Como é imposta |
 |---|---|
-| **Worktree isolation** | Agents never run on the main branch. Worktrees outside `~/orquestra/worktrees` are rejected. |
-| **Command firewall** (`guard.sh`) | Blocks before execution: `rm -rf` on absolute/home paths, `sudo`, `git push`, `git reset --hard`, checkout/switch to main/master, `curl\|sh` pipes, `chmod 777`, and any access to `.env*`, `*.pem`, `id_rsa`, `~/.ssh`, `~/.aws`. |
-| **Human-gated merge** | `nvo done` requires typing the agent's name in a real terminal. The app deliberately has no merge button. |
-| **Standard permissions** | Agent permission prompts are never bypassed. `--dangerously-skip-permissions` is not used anywhere in the codebase. |
+| **Isolamento por worktree** | Agentes nunca rodam na branch principal. Worktrees fora de `~/orquestra/worktrees` são rejeitados. |
+| **Firewall de comandos** (`guard.sh`) | Bloqueia antes da execução: `rm -rf` em caminhos absolutos/home, `sudo`, `git push`, `git reset --hard`, checkout/switch para main/master, pipes `curl\|sh`, `chmod 777`, e qualquer acesso a `.env*`, `*.pem`, `id_rsa`, `~/.ssh`, `~/.aws`. |
+| **Merge com trava humana** | O `nvo done` exige digitar o nome do agente num terminal de verdade. O app deliberadamente não tem botão de merge. |
+| **Permissões padrão** | Os prompts de permissão dos agentes nunca são contornados. `--dangerously-skip-permissions` não é usado em lugar nenhum do código. |
 
-The firewall hook ships to every worktree automatically (as `.claude/settings.local.json`, git-ignored), so agents carry their guardrails with them.
+O hook do firewall é distribuído automaticamente para todo worktree (como `.claude/settings.local.json`, ignorado pelo git), então os agentes carregam suas barreiras junto.
 
-**Privacy:** the repository versions code only. Your worktrees, notes, cloned repos, and project registration are excluded by `.gitignore` and never leave your machine.
+**Privacidade:** o repositório versiona apenas código. Seus worktrees, notas, repositórios clonados e o registro de projeto são excluídos pelo `.gitignore` e nunca saem da sua máquina.
 
-## Architecture
+## Arquitetura
 
 ```
 ~/orquestra/
-├── bin/nvo                  CLI — the single source of action (~450 lines of bash)
-├── bin/guard.sh             deterministic command firewall (PreToolUse hook)
-├── app/main.swift           native macOS app (SwiftUI, single file)
-├── app/build.sh             one-command rebuild
-├── .claude/settings.json    maestro's security hook
-├── install.sh               idempotent installer with environment detection
-└── runtime (git-ignored)
-    ├── worktrees/<project>/<agent>/    isolated working copy per agent
-    ├── notes/<project>/<agent>.md      progress protocol
-    └── repos/                          GitHub clones
+├── bin/nvo                  CLI — a única fonte de ação (~450 linhas de bash)
+├── bin/guard.sh             firewall determinístico de comandos (hook PreToolUse)
+├── app/main.swift           app nativo de macOS (SwiftUI, arquivo único)
+├── app/build.sh             recompilação em um comando
+├── .claude/settings.json    hook de segurança do maestro
+├── install.sh               instalador idempotente com detecção de ambiente
+└── runtime (ignorado pelo git)
+    ├── worktrees/<projeto>/<agente>/   cópia de trabalho isolada por agente
+    ├── notes/<projeto>/<agente>.md     protocolo de progresso
+    └── repos/                          clones do GitHub
 ```
 
-**Design principles**
+**Princípios de design**
 
-1. **The CLI is the only source of action.** Every button in the app shells out to `nvo` — there is no second code path to audit.
-2. **Notes are the protocol.** Agents write structured progress to markdown; status, notifications, and supervision all derive from it.
-3. **State is the filesystem.** No daemon, no database, no lock-in. Everything is inspectable with `ls` and `git`.
+1. **A CLI é a única fonte de ação.** Todo botão do app chama o `nvo` — não existe um segundo caminho de código para auditar.
+2. **As notas são o protocolo.** Os agentes escrevem progresso estruturado em markdown; status, notificações e supervisão derivam disso.
+3. **O estado é o sistema de arquivos.** Sem daemon, sem banco, sem lock-in. Tudo é inspecionável com `ls` e `git`.
 
-## Development
+## Desenvolvimento
 
 ```bash
-bash app/build.sh                        # rebuild the app after editing main.swift
-NVO_AGENT_CMD=bash nvo new t "..."       # spawn a plain shell instead of an agent (testing)
-swift app/gen_icon.swift out.png         # regenerate the icon assets
+bash app/build.sh                        # recompila o app após editar o main.swift
+NVO_AGENT_CMD=bash nvo new t "..."       # sobe um shell comum em vez de um agente (teste)
+swift app/gen_icon.swift out.png         # regenera os arquivos do ícone
 ```
 
-## License
+## Licença
 
 [MIT](LICENSE) © 2026 [Nevoa AI](https://nevoaai.com/?utm_source=orquestra&utm_medium=readme&utm_campaign=opensource_orchestrator)
 

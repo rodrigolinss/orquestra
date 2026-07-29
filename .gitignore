@@ -1,0 +1,16 @@
+# dados de runtime do usuario — NUNCA vao pro repositorio
+worktrees/
+notes/
+agents/
+repos/
+project.conf
+
+# artefatos de build
+app/Orquestra
+
+# lixo de sistema
+.DS_Store
+*.log
+
+# configuracao local da pessoa (a versionada e .claude/settings.json)
+.claude/settings.local.json

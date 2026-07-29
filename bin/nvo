@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# nvo — orquestrador local de agentes Claude Code.
+# Cada agente roda em um git worktree isolado, em uma branch agent/<nome>,
+# dentro de uma janela da sessao tmux "orquestra".
+
+set -euo pipefail
+
+ORQ="$HOME/orquestra"
+WT_ROOT="$ORQ/worktrees"
+NOTES_ROOT="$ORQ/notes"
+META_ROOT="$ORQ/agents"
+CONF="$ORQ/project.conf"
+SESSION="orquestra"
+# NVO_AGENT_CMD existe para testes (ex.: "bash"); em uso real e sempre claude,
+# SEM --dangerously-skip-permissions (regra 2 do SPEC).
+AGENT_CMD="${NVO_AGENT_CMD:-claude}"
+
+die() { echo "nvo: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+nvo — orquestrador local de agentes Claude Code
+
+  nvo init <caminho-do-repo>   registra o projeto ativo
+  nvo new <nome> "<tarefa>" [claude|codex]
+                               cria branch+worktree e inicia o agente no tmux
+  nvo ls                       lista agentes, branch, status e ultimas linhas
+  nvo read <nome> [n]          le a tela do agente sem interromper (padrao 40)
+  nvo send <nome> "<texto>"    envia um prompt ao agente
+  nvo note <nome>              imprime as notas do agente
+  nvo diff <nome>              diff da branch do agente contra a base
+  nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
+  nvo kill <nome>              encerra janela e remove worktree SEM merge
+  nvo attach                   entra na sessao tmux "orquestra"
+  nvo doctor                   diagnostica o ambiente (deps, login, hook)
+EOF
+}
+
+load_project() {
+  [ -f "$CONF" ] || die "nenhum projeto ativo. Rode: nvo init <caminho-do-repo>"
+  REPO="$(cat "$CONF")"
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "projeto registrado nao e mais um repo git: $REPO"
+  PROJ="$(basename "$REPO")"
+}
+
+check_name() {
+  printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_-]+$' \
+    || die "nome invalido '$1' (use apenas letras, numeros, - e _)"
+}
+
+wt_path()   { echo "$WT_ROOT/$PROJ/$1"; }
+meta_path() { echo "$META_ROOT/$PROJ/$1"; }
+note_path() { echo "$NOTES_ROOT/$PROJ/$1.md"; }
+
+# Regra 7 do SPEC: worktree fora de ~/orquestra/worktrees e recusado.
+assert_wt_inside() {
+  case "$1" in
+    "$WT_ROOT"/*) ;;
+    *) die "worktree fora de $WT_ROOT e recusado: $1" ;;
+  esac
+}
+
+ensure_session() {
+  tmux has-session -t "$SESSION" 2>/dev/null \
+    || tmux new-session -d -s "$SESSION" -n maestro -c "$ORQ"
+}
+
+agent_exists() { [ -d "$(wt_path "$1")" ]; }
+
+cmd_init() {
+  [ $# -eq 1 ] || die "uso: nvo init <caminho-do-repo>"
+  local repo
+  repo="$(cd "$1" 2>/dev/null && pwd)" || die "diretorio nao existe: $1"
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "nao e um repositorio git: $repo"
+  echo "$repo" > "$CONF"
+  echo "projeto ativo: $(basename "$repo") ($repo)"
+}
+
+cmd_new() {
+  [ $# -ge 2 ] || die 'uso: nvo new <nome> "<tarefa>" [claude|codex]'
+  local name="$1" task="$2" cli="${3:-$AGENT_CMD}"
+  case "$cli" in
+    claude|codex|bash) ;;
+    *) die "cli invalida '$cli' (use claude ou codex)" ;;
+  esac
+  command -v "$cli" >/dev/null 2>&1 || die "'$cli' nao esta instalado (veja nvo doctor)"
+  check_name "$name"
+  load_project
+  local wt base branch note meta
+  wt="$(wt_path "$name")"
+  assert_wt_inside "$wt"
+  agent_exists "$name" && die "agente '$name' ja existe"
+  branch="agent/$name"
+  git -C "$REPO" show-ref --verify --quiet "refs/heads/$branch" \
+    && die "branch $branch ja existe; escolha outro nome ou apague-a"
+
+  base="$(git -C "$REPO" symbolic-ref --short HEAD)" \
+    || die "repo esta em detached HEAD; faca checkout de uma branch primeiro"
+  [ "$base" = "main" ] || [ "$base" = "master" ] || true  # base pode ser qualquer branch
+
+  mkdir -p "$WT_ROOT/$PROJ" "$NOTES_ROOT/$PROJ" "$META_ROOT/$PROJ"
+  git -C "$REPO" worktree add -b "$branch" "$wt" "$base" >/dev/null
+
+  meta="$(meta_path "$name")"
+  printf 'base=%s\ncli=%s\n' "$base" "$cli" > "$meta.meta"
+
+  note="$(note_path "$name")"
+  [ -f "$note" ] || printf '# %s — %s\n\n' "$PROJ" "$name" > "$note"
+
+  # O agente tambem recebe o guard: settings.local.json e ignorado pelo git,
+  # entao nao suja o diff da branch.
+  mkdir -p "$wt/.claude"
+  cp "$ORQ/.claude/settings.json" "$wt/.claude/settings.local.json"
+
+  # Prompt inicial via arquivo para evitar inferno de aspas no send-keys
+  cat > "$meta.prompt" <<EOF
+Tarefa: $task
+
+Contexto e regras obrigatorias:
+- Voce esta em um git worktree isolado, na branch $branch. Trabalhe somente aqui.
+- Nao troque de branch, nao toque em main/master, nao faca git push.
+- Faca commits pequenos e frequentes na sua branch.
+- Ao fim de cada etapa, registre progresso, decisoes e bloqueios no arquivo
+  $note (crie secoes com data/hora). O orquestrador le essas notas.
+- Ao terminar a tarefa, escreva "STATUS: CONCLUIDO" na ultima secao das notas.
+
+Comece agora.
+EOF
+
+  ensure_session
+  tmux new-window -t "$SESSION" -n "$name" -c "$wt"
+  tmux send-keys -t "$SESSION:$name" "$cli \"\$(cat '$meta.prompt')\"" Enter
+
+  echo "agente '$name' criado ($cli)"
+  echo "  branch:   $branch (base: $base)"
+  echo "  worktree: $wt"
+  echo "  notas:    $note"
+  echo "  tela:     nvo read $name  |  ao vivo: nvo attach"
+}
+
+cmd_ls() {
+  load_project
+  local dir name branch changes lines
+  [ -d "$WT_ROOT/$PROJ" ] || { echo "nenhum agente ativo em $PROJ"; return 0; }
+  local found=0
+  for dir in "$WT_ROOT/$PROJ"/*/; do
+    [ -d "$dir" ] || continue
+    found=1
+    name="$(basename "$dir")"
+    branch="$(git -C "$dir" branch --show-current 2>/dev/null || echo '?')"
+    changes="$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    echo "== $name  [branch: $branch, arquivos alterados: $changes]"
+    lines="$(tmux capture-pane -pt "$SESSION:$name" 2>/dev/null \
+      | grep -v '^[[:space:]]*$' | tail -3 || true)"
+    if [ -n "$lines" ]; then
+      printf '%s\n' "$lines" | sed 's/^/   | /'
+    else
+      echo "   | (sem janela tmux ativa)"
+    fi
+    echo
+  done
+  [ "$found" -eq 1 ] || echo "nenhum agente ativo em $PROJ"
+}
+
+cmd_read() {
+  [ $# -ge 1 ] || die "uso: nvo read <nome> [n]"
+  load_project
+  local name="$1" n="${2:-40}"
+  agent_exists "$name" || die "agente '$name' nao existe"
+  tmux capture-pane -pt "$SESSION:$name" -S -1000 2>/dev/null | tail -n "$n" \
+    || die "janela tmux do agente '$name' nao encontrada"
+}
+
+cmd_send() {
+  [ $# -eq 2 ] || die 'uso: nvo send <nome> "<texto>"'
+  load_project
+  local name="$1" text="$2"
+  agent_exists "$name" || die "agente '$name' nao existe"
+  tmux send-keys -t "$SESSION:$name" -l "$text"
+  sleep 0.3
+  tmux send-keys -t "$SESSION:$name" Enter
+  echo "enviado para '$name'"
+}
+
+cmd_note() {
+  [ $# -eq 1 ] || die "uso: nvo note <nome>"
+  load_project
+  local note; note="$(note_path "$1")"
+  [ -f "$note" ] || die "sem notas para '$1' ($note)"
+  cat "$note"
+}
+
+get_base() {
+  local meta; meta="$(meta_path "$1").meta"
+  [ -f "$meta" ] || die "metadados do agente '$1' nao encontrados"
+  sed -n 's/^base=//p' "$meta"
+}
+
+cmd_diff() {
+  [ $# -eq 1 ] || die "uso: nvo diff <nome>"
+  load_project
+  local name="$1" wt base
+  agent_exists "$name" || die "agente '$name' nao existe"
+  wt="$(wt_path "$name")"
+  base="$(get_base "$name")"
+  echo "== commits de agent/$name desde $base:"
+  git -C "$wt" log --oneline "$base..HEAD" || true
+  echo
+  # diff contra a base inclui tambem mudancas ainda nao commitadas
+  git -C "$wt" diff "$base"
+}
+
+cmd_done() {
+  [ $# -eq 1 ] || die "uso: nvo done <nome>"
+  load_project
+  local name="$1" wt base branch confirm
+  agent_exists "$name" || die "agente '$name' nao existe"
+  wt="$(wt_path "$name")"
+  assert_wt_inside "$wt"
+  base="$(get_base "$name")"
+  branch="agent/$name"
+
+  [ -z "$(git -C "$wt" status --porcelain)" ] \
+    || die "o worktree de '$name' tem mudancas nao commitadas; peca ao agente para commitar (nvo send $name \"commite seu trabalho\")"
+
+  echo "== diff de $branch contra $base:"
+  git -C "$REPO" diff "$base...$branch" || true
+  echo
+  git -C "$REPO" log --oneline "$base..$branch" || true
+  echo
+
+  # Regra 6: merge nunca e automatico. Confirmacao humana digitando o nome.
+  printf 'Digite o nome do agente (%s) para confirmar o merge, ou qualquer outra coisa para cancelar: ' "$name"
+  IFS= read -r confirm
+  [ "$confirm" = "$name" ] || die "confirmacao nao confere; merge cancelado"
+
+  [ "$(git -C "$REPO" symbolic-ref --short HEAD)" = "$base" ] \
+    || die "o repo principal nao esta na branch base '$base'; faca checkout dela antes"
+  [ -z "$(git -C "$REPO" status --porcelain)" ] \
+    || die "o repo principal tem mudancas nao commitadas; resolva antes do merge"
+
+  git -C "$REPO" merge --no-ff "$branch" -m "merge $branch"
+  git -C "$REPO" worktree remove "$wt"
+  git -C "$REPO" branch -d "$branch"
+  tmux kill-window -t "$SESSION:$name" 2>/dev/null || true
+  rm -f "$(meta_path "$name").meta" "$(meta_path "$name").prompt"
+  echo "merge de $branch concluido; worktree removido. Notas preservadas em $(note_path "$name")"
+}
+
+cmd_kill() {
+  [ $# -eq 1 ] || die "uso: nvo kill <nome>"
+  load_project
+  local name="$1" wt
+  agent_exists "$name" || die "agente '$name' nao existe"
+  wt="$(wt_path "$name")"
+  assert_wt_inside "$wt"
+  tmux kill-window -t "$SESSION:$name" 2>/dev/null || true
+  git -C "$REPO" worktree remove --force "$wt"
+  rm -f "$(meta_path "$name").meta" "$(meta_path "$name").prompt"
+  echo "agente '$name' encerrado SEM merge. A branch agent/$name foi preservada;"
+  echo "para descartar de vez: git -C $REPO branch -D agent/$name"
+}
+
+cmd_attach() {
+  ensure_session
+  exec tmux attach -t "$SESSION"
+}
+
+cmd_doctor() {
+  local ok=0 warn=0 fail=0
+  chk() { # chk <status:OK|AVISO|FALTA> <mensagem> [dica]
+    case "$1" in
+      OK)    ok=$((ok+1));   printf '  \033[32m✓\033[0m %s\n' "$2" ;;
+      AVISO) warn=$((warn+1)); printf '  \033[33m!\033[0m %s\n' "$2"; [ "${3:-}" ] && printf '      → %s\n' "$3" ;;
+      FALTA) fail=$((fail+1)); printf '  \033[31m✗\033[0m %s\n' "$2"; [ "${3:-}" ] && printf '      → %s\n' "$3" ;;
+    esac
+  }
+  echo "nvo doctor — diagnostico do ambiente"
+  echo
+
+  command -v tmux >/dev/null 2>&1 \
+    && chk OK "tmux $(tmux -V | awk '{print $2}')" \
+    || chk FALTA "tmux nao encontrado" "brew install tmux"
+
+  command -v jq >/dev/null 2>&1 \
+    && chk OK "jq instalado" \
+    || chk FALTA "jq nao encontrado" "brew install jq"
+
+  if command -v git >/dev/null 2>&1; then
+    chk OK "git $(git --version | awk '{print $3}')"
+    if [ -n "$(git config --global user.name 2>/dev/null)" ]; then
+      chk OK "identidade git: $(git config --global user.name)"
+    else
+      chk AVISO "git sem user.name global" 'git config --global user.name "Seu Nome" && git config --global user.email voce@email.com'
+    fi
+  else
+    chk FALTA "git nao encontrado" "xcode-select --install"
+  fi
+
+  if command -v claude >/dev/null 2>&1; then
+    chk OK "Claude Code instalado ($(command -v claude))"
+    if [ -f "$HOME/.claude.json" ] || [ -d "$HOME/.claude" ]; then
+      chk OK "Claude Code ja foi usado nesta maquina (login existente sera aproveitado)"
+    else
+      chk AVISO "Claude Code nunca rodou aqui" "rode 'claude' uma vez para logar; o orquestra usa a mesma conta"
+    fi
+  else
+    chk FALTA "Claude Code nao encontrado" "npm install -g @anthropic-ai/claude-code  (ou: brew install claude)"
+  fi
+
+  command -v codex >/dev/null 2>&1 \
+    && chk OK "Codex CLI instalado (agentes podem usar: nvo new nome \"tarefa\" codex)" \
+    || chk AVISO "Codex CLI ausente (opcional — segundo harness de agente)" "npm install -g @openai/codex"
+
+  command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 \
+    && chk OK "GitHub CLI logado (clone de repos privados funciona)" \
+    || chk AVISO "GitHub CLI ausente ou deslogado (opcional)" "brew install gh && gh auth login — necessario so para repos privados via https"
+
+  [ -x "$ORQ/bin/guard.sh" ] \
+    && chk OK "guard.sh presente e executavel" \
+    || chk FALTA "guard.sh ausente ou sem permissao de execucao" "chmod +x $ORQ/bin/guard.sh"
+
+  grep -q '"PreToolUse"' "$ORQ/.claude/settings.json" 2>/dev/null \
+    && chk OK "hook de seguranca configurado (.claude/settings.json)" \
+    || chk FALTA "hook de seguranca ausente" "rode ./install.sh de novo"
+
+  case ":$PATH:" in
+    *":$ORQ/bin:"*) chk OK "~/orquestra/bin no PATH" ;;
+    *) chk AVISO "~/orquestra/bin fora do PATH desta sessao" "source ~/.zshrc ou abra um terminal novo" ;;
+  esac
+
+  [ -d "$HOME/Applications/Orquestra.app" ] \
+    && chk OK "Orquestra.app instalado" \
+    || chk AVISO "Orquestra.app nao compilado (opcional, so macOS)" "bash $ORQ/app/build.sh"
+
+  if [ -f "$CONF" ]; then
+    chk OK "projeto ativo: $(cat "$CONF")"
+  else
+    chk AVISO "nenhum projeto registrado ainda" "nvo init <pasta>  ou botao 'projeto' no app"
+  fi
+
+  echo
+  echo "resultado: $ok ok, $warn avisos, $fail faltando"
+  [ "$fail" -eq 0 ] && echo "pronto para orquestrar." || echo "resolva os itens ✗ acima antes de usar."
+  [ "$fail" -eq 0 ]
+}
+
+case "${1:-}" in
+  init)   shift; cmd_init "$@" ;;
+  new)    shift; cmd_new "$@" ;;
+  ls)     shift; cmd_ls "$@" ;;
+  read)   shift; cmd_read "$@" ;;
+  send)   shift; cmd_send "$@" ;;
+  note)   shift; cmd_note "$@" ;;
+  diff)   shift; cmd_diff "$@" ;;
+  done)   shift; cmd_done "$@" ;;
+  kill)   shift; cmd_kill "$@" ;;
+  attach) shift; cmd_attach "$@" ;;
+  doctor) shift; cmd_doctor "$@" ;;
+  -h|--help|help|"") usage ;;
+  *) die "comando desconhecido: $1 (veja nvo --help)" ;;
+esac

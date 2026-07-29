@@ -61,10 +61,11 @@ func openTerminal(_ command: String) {
 // MARK: - Model
 
 enum AgentStatus: String {
-    case trabalhando, concluido, bloqueado
+    case trabalhando, aguardando, concluido, bloqueado
     var color: Color {
         switch self {
         case .trabalhando: return Color(red: 0.63, green: 0.63, blue: 0.67)  // cinza: em curso
+        case .aguardando: return Color(red: 0.35, green: 0.78, blue: 0.98)   // azul: plano pronto
         case .concluido: return Color(red: 0.8, green: 1.0, blue: 0.0)       // verde nevoa
         case .bloqueado: return Color(red: 1.0, green: 0.42, blue: 0.42)
         }
@@ -72,9 +73,102 @@ enum AgentStatus: String {
     var label: String {
         switch self {
         case .trabalhando: return "trabalhando"
+        case .aguardando: return "plano aguardando"
         case .concluido: return "concluído"
         case .bloqueado: return "bloqueado"
         }
+    }
+}
+
+// Detecta um menu de escolha do Claude Code na tela ("1. Yes / 2. No") para
+// oferecer botoes de resposta dentro do app, sem trocar de janela.
+struct PanePrompt {
+    let options: [(key: String, label: String)]
+    var isAsking: Bool { !options.isEmpty }
+
+    init(pane: String) {
+        let tail = String(pane.suffix(1500))
+        var found: [(String, String)] = []
+        for raw in tail.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t❯>│|"))
+            guard let first = line.first, first.isNumber,
+                  line.count > 3 else { continue }
+            let idx = line.index(line.startIndex, offsetBy: 1)
+            guard line[idx] == "." || line[idx] == ")" else { continue }
+            let key = String(first)
+            var label = String(line[line.index(after: idx)...])
+                .trimmingCharacters(in: .whitespaces)
+            if label.isEmpty { continue }
+            if label.count > 46 { label = String(label.prefix(44)) + "…" }
+            if !found.contains(where: { $0.0 == key }) { found.append((key, label)) }
+        }
+        // exige pelo menos duas opcoes para nao confundir com lista comum
+        self.options = found.count >= 2 ? Array(found.prefix(4)) : []
+    }
+}
+
+// Barra de teclas: responde prompts e navega sem sair do app
+struct TerminalKeys: View {
+    let window: String
+    let pane: String
+    let orch: Orchestra
+
+    var body: some View {
+        let prompt = PanePrompt(pane: pane)
+        VStack(alignment: .leading, spacing: 5) {
+            if prompt.isAsking {
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.raised.fill").font(.system(size: 9))
+                        .foregroundColor(Theme.accent)
+                    Text("precisa da sua resposta:")
+                        .font(.system(size: 9, weight: .semibold)).foregroundColor(Theme.accent)
+                    ForEach(prompt.options, id: \.key) { opt in
+                        Button {
+                            orch.sendLiteral(window, opt.key)
+                        } label: {
+                            Text("\(opt.key). \(opt.label)")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(Theme.bg)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Theme.accent)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .help("responde \(opt.key) direto no terminal do agente")
+                    }
+                    Spacer()
+                }
+            }
+            HStack(spacing: 4) {
+                Text("teclas").font(.system(size: 8)).foregroundColor(Theme.dim.opacity(0.7))
+                keyButton("↑", "Up"); keyButton("↓", "Down")
+                keyButton("⏎", "Enter"); keyButton("esc", "Escape")
+                keyButton("tab", "Tab"); keyButton("⌃C", "C-c")
+                ForEach(["1", "2", "3"], id: \.self) { d in
+                    Button { orch.sendLiteral(window, d) } label: {
+                        Text(d).font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(Theme.dim)
+                            .frame(minWidth: 16)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.06)).cornerRadius(3)
+                    }
+                    .buttonStyle(.plain)
+                    .help("envia a tecla \(d)")
+                }
+                Spacer()
+            }
+        }
+    }
+
+    func keyButton(_ label: String, _ tmuxKey: String) -> some View {
+        Button { orch.sendKey(window, tmuxKey) } label: {
+            Text(label).font(.system(size: 9, design: .monospaced))
+                .foregroundColor(Theme.dim)
+                .padding(.horizontal, 5).padding(.vertical, 2)
+                .background(Color.white.opacity(0.06)).cornerRadius(3)
+        }
+        .buttonStyle(.plain)
+        .help("envia \(label) para o terminal")
     }
 }
 
@@ -165,6 +259,22 @@ final class Orchestra: ObservableObject {
         }
     }
 
+    // o marcador de status que aparece por ultimo nas notas manda
+    static func statusFromNote(_ note: String) -> AgentStatus {
+        let tail = String(note.suffix(4000)).uppercased()
+        var best: (Int, AgentStatus) = (-1, .trabalhando)
+        for (needle, st) in [("STATUS: CONCLU", AgentStatus.concluido),
+                             ("STATUS: AGUARDANDO", .aguardando),
+                             ("BLOQUEADO", .bloqueado),
+                             ("BLOQUEIO:", .bloqueado)] {
+            if let r = tail.range(of: needle, options: .backwards) {
+                let pos = tail.distance(from: tail.startIndex, to: r.lowerBound)
+                if pos > best.0 { best = (pos, st) }
+            }
+        }
+        return best.1
+    }
+
     func pane(_ window: String, lines: Int = 40) -> String? {
         let r = sh(TMUX, ["capture-pane", "-pt", "\(SESSION):\(window)", "-S", "-200"])
         guard r.code == 0 else { return nil }
@@ -196,10 +306,8 @@ final class Orchestra: ObservableObject {
                     let changes = sh(GIT, ["-C", wt, "status", "--porcelain"]).out
                         .split(separator: "\n").count
                     let note = (try? String(contentsOfFile: "\(ORQ)/notes/\(proj)/\(name).md", encoding: .utf8)) ?? ""
-                    let tail = String(note.suffix(2000)).uppercased()
-                    let status: AgentStatus =
-                        (tail.contains("STATUS: CONCLUIDO") || tail.contains("STATUS: CONCLUÍDO")) ? .concluido :
-                        (tail.contains("BLOQUEADO") || tail.contains("BLOQUEIO:")) ? .bloqueado : .trabalhando
+                    // mesma logica do nvo: o marcador que aparece por ultimo manda
+                    let status = Orchestra.statusFromNote(note)
                     var cli = "claude", model = ""
                     if let meta = try? String(contentsOfFile: "\(ORQ)/agents/\(proj)/\(name).meta",
                                               encoding: .utf8) {
@@ -237,10 +345,31 @@ final class Orchestra: ObservableObject {
 
     // MARK: acoes (todas via nvo — o app nao inventa caminho proprio)
 
+    // nvo maestro abre o claude DENTRO do projeto, com o briefing de orquestrador
     func startMaestro() {
+        DispatchQueue.global().async {
+            let r = sh(NVO, ["maestro"])
+            if r.code != 0 {
+                DispatchQueue.main.async { self.lastError = (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines) }
+            }
+        }
+    }
+
+    func sendKey(_ window: String, _ key: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(SESSION):maestro", "-l", "cd ~/orquestra && claude"])
-        sh(TMUX, ["send-keys", "-t", "\(SESSION):maestro", "Enter"])
+        sh(TMUX, ["send-keys", "-t", "\(SESSION):\(window)", key])
+    }
+
+    func sendLiteral(_ window: String, _ text: String) {
+        ensureSession()
+        sh(TMUX, ["send-keys", "-t", "\(SESSION):\(window)", "-l", text])
+    }
+
+    func approvePlan(_ name: String) {
+        DispatchQueue.global().async {
+            sh(NVO, ["approve", name])
+            DispatchQueue.main.async { self.refresh() }
+        }
     }
 
     func sendMaestro(_ text: String) {
@@ -256,9 +385,12 @@ final class Orchestra: ObservableObject {
     }
 
     func newAgent(_ name: String, _ task: String, cli: String = "claude",
-                  model: String = "", done: @escaping (String?) -> Void) {
+                  model: String = "", plan: Bool = false,
+                  done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            var args = ["new", name, task, cli]
+            var args = ["new"]
+            if plan { args.append("--plan") }
+            args += [name, task, cli]
             if !model.isEmpty { args.append(model) }
             let r = sh(NVO, args)
             DispatchQueue.main.async {
@@ -532,7 +664,10 @@ struct MaestroNode: View {
             TerminalText(content: orch.maestroPane.isEmpty
                          ? "o terminal do maestro aparece aqui quando você iniciar"
                          : orch.maestroPane, size: 11)
-                .frame(height: 210)
+                .frame(height: 240)
+            if orch.maestroRunning {
+                TerminalKeys(window: "maestro", pane: orch.maestroPane, orch: orch)
+            }
             if orch.maestroRunning && orch.agents.isEmpty && draft.isEmpty {
                 HStack(spacing: 6) {
                     Text("experimente:").font(.system(size: 9)).foregroundColor(Theme.dim)
@@ -597,8 +732,26 @@ struct AgentNode: View {
             Text("\(agent.branch)  ·  \(agent.cli)\(agent.model.isEmpty ? "" : " · \(agent.model)")")
                 .font(.system(size: 9, design: .monospaced)).foregroundColor(Theme.dim)
             TerminalText(content: agent.pane).frame(height: 120)
+            TerminalKeys(window: agent.name, pane: agent.pane, orch: orch)
             PromptField(placeholder: "mandar instrução para \(agent.name)…", text: $draft) { t in
                 orch.sendAgent(agent.name, t)
+            }
+            if agent.status == .aguardando {
+                HStack(spacing: 6) {
+                    Image(systemName: "list.clipboard").font(.system(size: 9))
+                        .foregroundColor(AgentStatus.aguardando.color)
+                    Text("plano pronto — revise antes de liberar")
+                        .font(.system(size: 9)).foregroundColor(Theme.dim)
+                    Spacer()
+                    SmallButton(label: "ver plano", icon: "note.text",
+                                help: "lê o plano que o agente escreveu nas notas", action: onNotes)
+                    SmallButton(label: "aprovar plano", icon: "play.fill",
+                                tint: AgentStatus.aguardando.color,
+                                help: "libera o agente para executar o plano") {
+                        orch.approvePlan(agent.name)
+                    }
+                }
+                .padding(.vertical, 2)
             }
             HStack(spacing: 6) {
                 SmallButton(label: "notas", icon: "note.text",
@@ -827,6 +980,7 @@ struct NewAgentSheet: View {
     @State private var task = ""
     @State private var cli = "claude"
     @State private var model = ""
+    @State private var planFirst = false
     @State private var error: String?
     @State private var creating = false
     var body: some View {
@@ -852,6 +1006,16 @@ struct NewAgentSheet: View {
                 Text("dica: Sonnet resolve a maioria das tarefas de builder por ~40% do custo do Opus")
                     .font(.system(size: 9)).foregroundColor(Theme.dim)
             }
+            Toggle(isOn: $planFirst) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("pedir plano antes de executar").font(.system(size: 11))
+                        .foregroundColor(Theme.text)
+                    Text("o agente escreve o que pretende fazer e espera sua aprovação — evita gastar token no caminho errado")
+                        .font(.system(size: 9)).foregroundColor(Theme.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .toggleStyle(.checkbox)
             Text("Tarefa (seja específico: arquivo, critério de pronto, o que NÃO fazer)")
                 .font(.system(size: 10)).foregroundColor(Theme.dim)
             TextEditor(text: $task)
@@ -872,7 +1036,7 @@ struct NewAgentSheet: View {
                     let t = task.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !n.isEmpty, !t.isEmpty, !creating else { return }
                     creating = true
-                    orch.newAgent(n, t, cli: cli, model: model) { err in
+                    orch.newAgent(n, t, cli: cli, model: model, plan: planFirst) { err in
                         creating = false
                         if let err = err { error = err } else { dismiss() }
                     }
@@ -1002,7 +1166,7 @@ struct HelpView: View {
                     row("folder", "1 · Escolha o projeto",
                         "Pasta local ou repositório do GitHub. Cada agente trabalha numa cópia isolada — nada muda no seu projeto sem sua aprovação.")
                     row("play.fill", "2 · Inicie o maestro",
-                        "Fale com ele em português: “cria um builder pra fazer X e um reviewer pra auditar”. Ele cria e coordena os agentes sozinho.")
+                        "Ele abre já dentro do seu projeto, sabendo que é um orquestrador. Fale em português: “cria um builder pra fazer X e um reviewer pra auditar”.")
                     row("person.3.fill", "3 · Acompanhe os agentes",
                         "Cada card mostra a tela ao vivo. Você recebe notificação do macOS quando alguém termina ou trava.")
                     row("checkmark.seal", "4 · Revise e aprove",
@@ -1011,11 +1175,16 @@ struct HelpView: View {
                     Divider().background(Theme.cardBorder)
                     Text("OS STATUS").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
                     row("circle.fill", "cinza — trabalhando", "o agente está executando a tarefa", tint: Theme.dim)
+                    row("circle.fill", "azul — plano aguardando", "ele escreveu o plano e parou; leia e clique em aprovar plano", tint: AgentStatus.aguardando.color)
                     row("circle.fill", "verde — concluído", "hora de revisar o diff e aprovar", tint: AgentStatus.concluido.color)
                     row("circle.fill", "vermelho — bloqueado", "o agente precisa de você; leia as notas dele", tint: AgentStatus.bloqueado.color)
 
                     Divider().background(Theme.cardBorder)
                     Text("BOM SABER").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
+                    row("keyboard", "Responder sem sair do app",
+                        "Quando um agente pede permissão, os botões de resposta (1, 2, 3…) aparecem acima do campo de texto. A linha de teclas (↑ ↓ ⏎ esc tab ⌃C) controla o terminal de dentro do painel.")
+                    row("list.clipboard", "Pedir plano antes de executar",
+                        "No “novo agente”, marque a caixa de plano. O agente escreve o que pretende fazer e espera sua aprovação — é o que mais economiza token em tarefa grande ou vaga.")
                     row("bolt.fill", "Medidor de tokens",
                         "A barra do topo mede o uso do Claude Code na sua máquina inteira (todas as sessões, não só os agentes daqui): janela de 5h, quando reseta e o total do dia. Os valores em $ são o equivalente em API — no plano Max é régua de consumo, não cobrança.")
                     row("dollarsign.circle", "Economize com modelos",

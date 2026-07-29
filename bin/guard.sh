@@ -58,7 +58,8 @@ printf '%s' "$cmd" | grep -Eq '\.pem([^A-Za-z0-9_-]|$)' \
   && block "acesso a arquivos .pem nao e permitido"
 printf '%s' "$cmd" | grep -Eq 'id_rsa' \
   && block "acesso a chaves SSH nao e permitido"
-printf '%s' "$cmd" | grep -Eq '(~|\$HOME|/Users/[^/[:space:]]+)/\.(ssh|aws)(/|[^A-Za-z0-9_-]|$)' \
+# cobre home de macOS (/Users/x), Linux e WSL (/home/x, /root), ~ e $HOME
+printf '%s' "$cmd" | grep -Eq '(~|\$HOME|/root|/(Users|home)/[^/[:space:]]+)/\.(ssh|aws)(/|[^A-Za-z0-9_-]|$)' \
   && block "acesso a ~/.ssh e ~/.aws nao e permitido"
 
 exit 0

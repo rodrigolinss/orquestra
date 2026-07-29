@@ -6,6 +6,12 @@
 set -euo pipefail
 
 ORQ="$HOME/orquestra"
+# shellcheck source=platform.sh
+[ -f "$ORQ/bin/platform.sh" ] && . "$ORQ/bin/platform.sh" || {
+  ORQ_OS="desconhecido"; ORQ_PKG="none"; ORQ_HAS_APP=0
+  ORQ_SHELL_RC="$HOME/.profile"
+  orq_pkg_hint() { echo "instale '$1' pelo gerenciador de pacotes do seu sistema"; }
+}
 WT_ROOT="$ORQ/worktrees"
 NOTES_ROOT="$ORQ/notes"
 META_ROOT="$ORQ/agents"
@@ -22,8 +28,11 @@ usage() {
 nvo — orquestrador local de agentes Claude Code
 
   nvo init <caminho-do-repo>   registra o projeto ativo
-  nvo new <nome> "<tarefa>" [claude|codex]
+  nvo maestro                  inicia o maestro no projeto, com briefing
+  nvo new [--plan] <nome> "<tarefa>" [claude|codex] [modelo]
                                cria branch+worktree e inicia o agente no tmux
+                               --plan: agente planeja e espera aprovacao
+  nvo approve <nome>           aprova o plano de um agente em espera
   nvo ls                       lista agentes, branch, status e ultimas linhas
   nvo read <nome> [n]          le a tela do agente sem interromper (padrao 40)
   nvo send <nome> "<texto>"    envia um prompt ao agente
@@ -67,6 +76,19 @@ ensure_session() {
     || tmux new-session -d -s "$SESSION" -n maestro -c "$ORQ"
 }
 
+# instala o hook de seguranca num diretorio de trabalho, sem sujar o git do
+# usuario (settings.local.json + .git/info/exclude)
+install_guard_local() {
+  local d="$1" ex
+  mkdir -p "$d/.claude"
+  cp "$ORQ/.claude/settings.json" "$d/.claude/settings.local.json" 2>/dev/null || return 0
+  ex="$(git -C "$d" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
+  [ -n "$ex" ] || return 0
+  mkdir -p "$(dirname "$ex")"
+  grep -q 'claude/settings.local.json' "$ex" 2>/dev/null \
+    || printf '\n# orquestra (local, nao versionar)\n.claude/settings.local.json\n' >> "$ex"
+}
+
 agent_exists() { [ -d "$(wt_path "$1")" ]; }
 
 cmd_init() {
@@ -80,7 +102,18 @@ cmd_init() {
 }
 
 cmd_new() {
-  [ $# -ge 2 ] || die 'uso: nvo new <nome> "<tarefa>" [claude|codex] [modelo]'
+  # --plan em qualquer posicao: agente planeja e espera aprovacao antes de codar
+  local plan=0 args=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --plan) plan=1 ;;
+      *) args+=("$a") ;;
+    esac
+  done
+  set -- ${args[@]+"${args[@]}"}
+
+  [ $# -ge 2 ] || die 'uso: nvo new [--plan] <nome> "<tarefa>" [claude|codex] [modelo]'
   local name="$1" task="$2" cli="${3:-$AGENT_CMD}" model="${4:-}"
   case "$cli" in
     claude|codex|bash) ;;
@@ -112,25 +145,45 @@ cmd_new() {
   note="$(note_path "$name")"
   [ -f "$note" ] || printf '# %s — %s\n\n' "$PROJ" "$name" > "$note"
 
-  # O agente tambem recebe o guard: settings.local.json e ignorado pelo git,
-  # entao nao suja o diff da branch.
-  mkdir -p "$wt/.claude"
-  cp "$ORQ/.claude/settings.json" "$wt/.claude/settings.local.json"
+  # o agente carrega o guard junto, sem sujar o diff da branch
+  install_guard_local "$wt"
 
   # Prompt inicial via arquivo para evitar inferno de aspas no send-keys
-  cat > "$meta.prompt" <<EOF
-Tarefa: $task
+  {
+    printf 'Tarefa: %s\n\n' "$task"
+    if [ "$plan" = 1 ]; then
+      cat <<EOF
+PRIMEIRA ETAPA — PLANO, SEM ESCREVER CODIGO:
+Investigue o que for necessario para entender a tarefa, e escreva em $note:
+  1. o que voce entendeu que precisa ser feito
+  2. os arquivos que pretende criar ou alterar
+  3. os passos, em ordem
+  4. riscos, e o que voce explicitamente NAO vai fazer
+Depois escreva a linha "STATUS: AGUARDANDO APROVACAO" e PARE.
+Nao implemente nada nesta etapa. Alguem vai revisar o plano e aprovar.
+Quando receber a aprovacao, execute o plano que voce escreveu.
 
+EOF
+    fi
+    cat <<EOF
 Contexto e regras obrigatorias:
 - Voce esta em um git worktree isolado, na branch $branch. Trabalhe somente aqui.
 - Nao troque de branch, nao toque em main/master, nao faca git push.
 - Faca commits pequenos e frequentes na sua branch.
-- Ao fim de cada etapa, registre progresso, decisoes e bloqueios no arquivo
-  $note (crie secoes com data/hora). O orquestrador le essas notas.
+- Escopo: entregue exatamente o que foi pedido, no tamanho que foi pedido. Nao
+  adicione features, refatoracoes, abstracoes, nem tratamento de erro para
+  cenarios que nao podem acontecer. Nao invente requisitos futuros.
+- Duvida que muda o resultado do trabalho: NAO adivinhe. Escreva a pergunta em
+  $note numa linha comecando com "BLOQUEADO:" e pare. Alguem responde e voce
+  continua de onde parou. Decisoes pequenas (nome de variavel, ordem dos
+  arquivos, formatacao) resolva voce mesmo e apenas registre nas notas.
+- Ao fim de cada etapa, registre progresso e decisoes em $note (secoes com
+  data/hora). O orquestrador le essas notas em vez de ler sua tela.
 - Ao terminar a tarefa, escreva "STATUS: CONCLUIDO" na ultima secao das notas.
 
 Comece agora.
 EOF
+  } > "$meta.prompt"
 
   ensure_session
   tmux new-window -t "$SESSION" -n "$name" -c "$wt"
@@ -150,18 +203,107 @@ EOF
   echo "  tela:     nvo read $name  |  ao vivo: nvo attach"
 }
 
+# status derivado das notas do agente — o marcador que aparece por ultimo manda
+agent_status() {
+  local note last
+  note="$(note_path "$1")"
+  [ -f "$note" ] || { echo trabalhando; return; }
+  last="$(tail -c 4000 "$note" \
+    | grep -oiE 'STATUS:[[:space:]]*CONCLU|STATUS:[[:space:]]*AGUARDANDO|BLOQUEADO|BLOQUEIO:' \
+    | tail -1 | tr '[:lower:]' '[:upper:]')"
+  case "$last" in
+    *CONCLU*)     echo concluido ;;
+    *AGUARDANDO*) echo aguardando ;;
+    *BLOQUE*)     echo bloqueado ;;
+    *)            echo trabalhando ;;
+  esac
+}
+
+cmd_maestro() {
+  load_project
+  ensure_session
+  local brief="$META_ROOT/$PROJ.maestro.txt"
+  mkdir -p "$META_ROOT"
+  # o maestro tambem roda com o guard, no diretorio do projeto
+  install_guard_local "$REPO"
+  cat > "$brief" <<EOF
+Voce e o MAESTRO do orquestra: um orquestrador de agentes de codigo.
+
+Projeto ativo: $REPO
+Voce esta rodando dentro dessa pasta.
+
+SEU PAPEL: voce NAO escreve nem edita o codigo do projeto. Voce delega para
+agentes e acompanha o trabalho deles. Quem constroi sao eles, cada um numa
+copia isolada do projeto (git worktree + branch propria).
+
+SUAS FERRAMENTAS (rode pelo Bash):
+  nvo new [--plan] <nome> "<tarefa>" [claude|codex] [modelo]
+        cria um agente. Use --plan quando a tarefa for grande ou ambigua: o
+        agente escreve um plano e espera aprovacao antes de escrever codigo.
+        Modelo: use "sonnet" para construcao (bem mais barato) e reserve o
+        opus para revisao critica. Ex:
+          nvo new builder "implementa X conforme docs/x.md" claude sonnet
+          nvo new --plan refactor "reorganiza o modulo Y" claude opus
+  nvo ls                     status de todos os agentes
+  nvo note <nome>            le as notas de progresso de um agente
+  nvo read <nome> [n]        espia a tela de um agente
+  nvo send <nome> "<texto>"  manda instrucao para um agente
+  nvo approve <nome>         aprova o plano de um agente que esta aguardando
+  nvo diff <nome>            mostra o codigo que o agente escreveu
+
+COMO TRABALHAR BEM:
+- Prefira "nvo note" a "nvo read": as notas sao o protocolo oficial e custam
+  muito menos contexto que raspar a tela.
+- Escreva tarefas fechadas e verificaveis: diga o arquivo, o critério de
+  pronto, e o que NAO fazer. Tarefa vaga faz o agente gastar token errado.
+- Divida o trabalho por fronteira de arquivo ou modulo: dois agentes no mesmo
+  arquivo geram conflito de merge.
+- Comece com 2 agentes (ex: um builder e um reviewer), nao com 6.
+
+O QUE VOCE NAO FAZ:
+- Nao roda "nvo done", "nvo kill" nem "git push". Aprovar e descartar sao
+  decisoes do humano. Quando um agente concluir, avise o humano e diga para
+  ele revisar com "nvo diff <nome>" e aprovar com "nvo done <nome>".
+- Nao edita arquivos do projeto voce mesmo, mesmo que pareca mais rapido.
+
+Agora responda apenas "pronto" e aguarde as instrucoes do humano.
+EOF
+  tmux send-keys -t "$SESSION:maestro" \
+    "cd '$REPO' && claude \"\$(cat '$brief')\"" Enter
+  echo "maestro iniciado em $REPO"
+  echo "  acompanhe no app, ou entre com: nvo attach"
+}
+
+cmd_approve() {
+  [ $# -eq 1 ] || die "uso: nvo approve <nome>"
+  load_project
+  agent_exists "$1" || die "agente '$1' nao existe"
+  echo "== plano de '$1':"
+  cmd_note "$1"
+  echo
+  cmd_send "$1" "Plano aprovado. Execute o plano que voce registrou nas notas. Se surgir duvida que mude o resultado, pare e escreva BLOQUEADO: <pergunta> nas notas."
+  echo "plano aprovado — '$1' voltou a trabalhar"
+}
+
 cmd_ls() {
   load_project
-  local dir name branch changes lines
+  local dir name branch changes lines st badge
+  local n_done=0 n_wait=0 n_block=0 n_work=0 found=0
   [ -d "$WT_ROOT/$PROJ" ] || { echo "nenhum agente ativo em $PROJ"; return 0; }
-  local found=0
   for dir in "$WT_ROOT/$PROJ"/*/; do
     [ -d "$dir" ] || continue
     found=1
     name="$(basename "$dir")"
     branch="$(git -C "$dir" branch --show-current 2>/dev/null || echo '?')"
     changes="$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-    echo "== $name  [branch: $branch, arquivos alterados: $changes]"
+    st="$(agent_status "$name")"
+    case "$st" in
+      concluido)   badge=$'\033[32m● CONCLUIDO\033[0m';         n_done=$((n_done+1)) ;;
+      aguardando)  badge=$'\033[36m● PLANO AGUARDANDO\033[0m';  n_wait=$((n_wait+1)) ;;
+      bloqueado)   badge=$'\033[31m● BLOQUEADO\033[0m';         n_block=$((n_block+1)) ;;
+      *)           badge=$'\033[2m● trabalhando\033[0m';        n_work=$((n_work+1)) ;;
+    esac
+    printf '== %s  %s  [%s, %s arq. alterados]\n' "$name" "$badge" "$branch" "$changes"
     lines="$(tmux capture-pane -pt "$SESSION:$name" 2>/dev/null \
       | grep -v '^[[:space:]]*$' | tail -3 || true)"
     if [ -n "$lines" ]; then
@@ -171,7 +313,16 @@ cmd_ls() {
     fi
     echo
   done
-  [ "$found" -eq 1 ] || echo "nenhum agente ativo em $PROJ"
+  if [ "$found" -eq 0 ]; then
+    echo "nenhum agente ativo em $PROJ"
+    return 0
+  fi
+  printf 'resumo: %s concluido(s), %s plano(s) aguardando, %s bloqueado(s), %s trabalhando\n' \
+    "$n_done" "$n_wait" "$n_block" "$n_work"
+  [ "$n_done" -gt 0 ] && echo "  → revise: nvo diff <nome>   aprove: nvo done <nome>"
+  [ "$n_wait" -gt 0 ] && echo "  → leia o plano: nvo note <nome>   libere: nvo approve <nome>"
+  [ "$n_block" -gt 0 ] && echo "  → destrave: nvo note <nome>   responda: nvo send <nome> \"...\""
+  return 0
 }
 
 cmd_read() {
@@ -290,13 +441,20 @@ cmd_doctor() {
   echo "nvo doctor — diagnostico do ambiente"
   echo
 
+  case "$ORQ_OS" in
+    macos) chk OK "plataforma: macOS $(sw_vers -productVersion 2>/dev/null)" ;;
+    wsl)   chk OK "plataforma: Windows via WSL2 (${WSL_DISTRO_NAME:-linux})" ;;
+    linux) chk OK "plataforma: Linux" ;;
+    *)     chk AVISO "plataforma nao reconhecida ($(uname -s))" "o orquestra e testado em macOS, Linux e WSL2" ;;
+  esac
+
   command -v tmux >/dev/null 2>&1 \
     && chk OK "tmux $(tmux -V | awk '{print $2}')" \
-    || chk FALTA "tmux nao encontrado" "brew install tmux"
+    || chk FALTA "tmux nao encontrado" "$(orq_pkg_hint tmux)"
 
   command -v jq >/dev/null 2>&1 \
     && chk OK "jq instalado" \
-    || chk FALTA "jq nao encontrado" "brew install jq"
+    || chk FALTA "jq nao encontrado" "$(orq_pkg_hint jq)"
 
   if command -v git >/dev/null 2>&1; then
     chk OK "git $(git --version | awk '{print $3}')"
@@ -306,18 +464,30 @@ cmd_doctor() {
       chk AVISO "git sem user.name global" 'git config --global user.name "Seu Nome" && git config --global user.email voce@email.com'
     fi
   else
-    chk FALTA "git nao encontrado" "xcode-select --install"
+    [ "$ORQ_OS" = macos ] \
+      && chk FALTA "git nao encontrado" "xcode-select --install" \
+      || chk FALTA "git nao encontrado" "$(orq_pkg_hint git)"
   fi
 
   if command -v claude >/dev/null 2>&1; then
-    chk OK "Claude Code instalado ($(command -v claude))"
-    if [ -f "$HOME/.claude.json" ] || [ -d "$HOME/.claude" ]; then
-      chk OK "Claude Code ja foi usado nesta maquina (login existente sera aproveitado)"
-    else
-      chk AVISO "Claude Code nunca rodou aqui" "rode 'claude' uma vez para logar; o orquestra usa a mesma conta"
-    fi
+    local claude_path; claude_path="$(command -v claude)"
+    case "$claude_path" in
+      /mnt/[a-z]/*|*.exe)
+        # WSL enxerga o PATH do Windows: um claude.exe nao entende caminhos /home
+        chk FALTA "o 'claude' encontrado e o do Windows ($claude_path)" \
+          "instale o Claude Code DENTRO do WSL: npm install -g @anthropic-ai/claude-code" ;;
+      *)
+        chk OK "Claude Code instalado ($claude_path)"
+        if [ -f "$HOME/.claude.json" ] || [ -d "$HOME/.claude" ]; then
+          chk OK "Claude Code ja foi usado nesta maquina (login existente sera aproveitado)"
+        else
+          chk AVISO "Claude Code nunca rodou aqui" "rode 'claude' uma vez para logar; o orquestra usa a mesma conta"
+        fi ;;
+    esac
   else
-    chk FALTA "Claude Code nao encontrado" "npm install -g @anthropic-ai/claude-code  (ou: brew install claude)"
+    [ "$ORQ_OS" = macos ] \
+      && chk FALTA "Claude Code nao encontrado" "npm install -g @anthropic-ai/claude-code  (ou: brew install claude)" \
+      || chk FALTA "Claude Code nao encontrado" "npm install -g @anthropic-ai/claude-code"
   fi
 
   command -v codex >/dev/null 2>&1 \
@@ -326,7 +496,7 @@ cmd_doctor() {
 
   command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 \
     && chk OK "GitHub CLI logado (clone de repos privados funciona)" \
-    || chk AVISO "GitHub CLI ausente ou deslogado (opcional)" "brew install gh && gh auth login — necessario so para repos privados via https"
+    || chk AVISO "GitHub CLI ausente ou deslogado (opcional)" "$(orq_pkg_hint gh) && gh auth login — necessario so para repos privados via https"
 
   [ -x "$ORQ/bin/guard.sh" ] \
     && chk OK "guard.sh presente e executavel" \
@@ -338,12 +508,16 @@ cmd_doctor() {
 
   case ":$PATH:" in
     *":$ORQ/bin:"*) chk OK "~/orquestra/bin no PATH" ;;
-    *) chk AVISO "~/orquestra/bin fora do PATH desta sessao" "source ~/.zshrc ou abra um terminal novo" ;;
+    *) chk AVISO "~/orquestra/bin fora do PATH desta sessao" "source $ORQ_SHELL_RC ou abra um terminal novo" ;;
   esac
 
-  [ -d "$HOME/Applications/Orquestra.app" ] \
-    && chk OK "Orquestra.app instalado" \
-    || chk AVISO "Orquestra.app nao compilado (opcional, so macOS)" "bash $ORQ/app/build.sh"
+  if [ "$ORQ_HAS_APP" = 1 ]; then
+    [ -d "$HOME/Applications/Orquestra.app" ] \
+      && chk OK "Orquestra.app instalado" \
+      || chk AVISO "Orquestra.app nao compilado (opcional)" "bash $ORQ/app/build.sh"
+  else
+    chk OK "interface: CLI (o app visual e exclusivo do macOS)"
+  fi
 
   if [ -f "$CONF" ]; then
     chk OK "projeto ativo: $(cat "$CONF")"
@@ -367,9 +541,11 @@ case "${1:-}" in
   diff)   shift; cmd_diff "$@" ;;
   done)   shift; cmd_done "$@" ;;
   kill)   shift; cmd_kill "$@" ;;
-  attach) shift; cmd_attach "$@" ;;
-  doctor) shift; cmd_doctor "$@" ;;
-  usage)  shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
+  attach)  shift; cmd_attach "$@" ;;
+  maestro) shift; cmd_maestro "$@" ;;
+  approve) shift; cmd_approve "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
+  usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "comando desconhecido: $1 (veja nvo --help)" ;;
 esac

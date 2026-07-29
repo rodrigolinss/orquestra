@@ -7,11 +7,11 @@
 <h1 align="center">Orquestra</h1>
 
 <p align="center">
-  <strong>Rode um time de agentes de IA no seu Mac — isolados, supervisionados e seguros por construção.</strong>
+  <strong>Rode um time de agentes de IA na sua máquina — isolados, supervisionados e seguros por construção.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/plataforma-macOS-black?logo=apple" alt="macOS">
+  <img src="https://img.shields.io/badge/plataforma-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows%20(WSL2)-black" alt="Plataformas">
   <img src="https://img.shields.io/badge/agentes-Claude%20Code%20%C2%B7%20Codex-CCFF00" alt="Agentes">
   <img src="https://img.shields.io/badge/licen%C3%A7a-MIT-blue" alt="MIT">
   <img src="https://img.shields.io/badge/feito%20com-SwiftUI%20%2B%20Bash-orange" alt="Stack">
@@ -66,12 +66,47 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 
 ## Instalação
 
-**Requisitos:** macOS com [Homebrew](https://brew.sh). Pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada.
+**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos).
+
+| Plataforma | Interface | Observação |
+|---|---|---|
+| **macOS** | App nativo + CLI | Requer [Homebrew](https://brew.sh); o app compila se as Xcode Command Line Tools estiverem presentes |
+| **Linux** | CLI | Detecta `apt`, `dnf` ou `pacman` |
+| **Windows** | CLI, via **WSL2** | Instale dentro do WSL, não no Windows nativo — veja abaixo |
 
 ```bash
 git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
 cd ~/orquestra && ./install.sh
 ```
+
+<details>
+<summary><strong>Windows: passo a passo (WSL2)</strong></summary>
+
+O motor do Orquestra é bash + git + tmux, então roda nativamente dentro do WSL2 — o mesmo ambiente onde o Claude Code já funciona bem no Windows.
+
+```powershell
+# 1. no PowerShell (como administrador), instale o WSL2 e reinicie
+wsl --install
+```
+
+```bash
+# 2. dentro do Ubuntu do WSL
+sudo apt-get update && sudo apt-get install -y git tmux jq
+
+# 3. instale o Claude Code DENTRO do WSL (não use o do Windows)
+npm install -g @anthropic-ai/claude-code
+claude          # faça login uma vez
+
+# 4. instale o Orquestra
+git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
+cd ~/orquestra && ./install.sh
+```
+
+**A pegadinha principal:** o WSL enxerga o `PATH` do Windows, então um `claude.exe` instalado no Windows aparece no terminal do WSL — mas ele não entende caminhos `/home/...` e quebra. O `nvo doctor` detecta esse caso e avisa. Instale o Claude Code dentro do WSL.
+
+No Windows a interface é a CLI (o app visual usa SwiftUI, exclusivo da Apple). O `nvo ls` mostra o status de todos os agentes com cores, e o `nvo attach` abre a visão ao vivo no tmux. Uma UI multiplataforma em Tauri é um caminho aberto — abra uma issue se for útil pra você.
+
+</details>
 
 O instalador é idempotente e só preenche as lacunas: instala `tmux`/`jq` se faltarem, conecta o hook de segurança, adiciona a CLI ao seu `PATH` e compila o app nativo quando as Xcode Command Line Tools estão presentes. Ao final, faz um diagnóstico completo do ambiente:
 
@@ -102,9 +137,12 @@ Tudo o que o app faz, de forma scriptável:
 
 ```bash
 nvo init ~/projetos/minha-api         # registra o projeto ativo
+nvo maestro                           # abre o maestro no projeto, com briefing
 nvo new builder "implementa X"        # branch + worktree + janela tmux + agente
 nvo new reviewer "audita isso" codex  # o mesmo, mas rodando no Codex
-nvo ls                                # visão geral de todos os agentes
+nvo new --plan big "refatora Y"       # agente planeja e espera aprovação
+nvo approve big                       # libera o plano para execução
+nvo ls                                # visão geral com status colorido
 nvo read builder 60                   # espia a tela de um agente, sem interferir
 nvo send builder "prioriza o retry"   # envia um prompt
 nvo note builder                      # lê as notas de progresso dele
@@ -115,6 +153,19 @@ nvo attach                            # acompanha tudo ao vivo no tmux
 nvo doctor                            # diagnóstico do ambiente
 nvo usage                             # consumo de tokens: janela de 5h, dia, modelos
 ```
+
+### Plano antes de executar
+
+Para tarefas grandes ou ambíguas, `--plan` (ou a caixa "pedir plano" no app) faz o agente parar antes de escrever código:
+
+```bash
+nvo new --plan refactor "reorganiza o módulo de cobrança"
+# o agente investiga, escreve o plano nas notas e marca STATUS: AGUARDANDO APROVACAO
+nvo note refactor      # você lê o que ele pretende fazer
+nvo approve refactor   # aprovado → ele executa
+```
+
+É o maior economizador de tokens do sistema: barato descobrir que o entendimento estava errado **antes** de implementar. Os agentes também são instruídos a parar e perguntar (`BLOQUEADO: <pergunta>` nas notas) em vez de adivinhar quando uma dúvida muda o resultado do trabalho — e a não inventar features, refatorações ou abstrações fora do escopo pedido.
 
 ### Eficiência de tokens
 
@@ -144,8 +195,10 @@ O hook do firewall é distribuído automaticamente para todo worktree (como `.cl
 
 ```
 ~/orquestra/
-├── bin/nvo                  CLI — a única fonte de ação (~450 linhas de bash)
+├── bin/nvo                  CLI — a única fonte de ação (bash, multiplataforma)
 ├── bin/guard.sh             firewall determinístico de comandos (hook PreToolUse)
+├── bin/platform.sh          detecção de macOS / Linux / WSL2
+├── bin/nvo-usage.py         medidor de tokens (lê os transcritos do Claude Code)
 ├── app/main.swift           app nativo de macOS (SwiftUI, arquivo único)
 ├── app/build.sh             recompilação em um comando
 ├── .claude/settings.json    hook de segurança do maestro

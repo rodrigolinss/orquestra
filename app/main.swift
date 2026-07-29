@@ -357,17 +357,17 @@ struct NodeAnchors: PreferenceKey {
 
 // MARK: - Tema
 
-// Paleta Nevoa AI, extraida do CSS de nevoaai.com:
-// #CCFF00 (accent), #09090B (bg), #131315/#1C1C1F (cards), #FAFAFA/#A1A1AA (texto)
+// Paleta Nevoa AI (accent #CCFF00 de nevoaai.com) sobre neutros suaves —
+// nada de preto puro: tons de grafite para um visual clean.
 enum Theme {
-    static let bg = Color(red: 0.035, green: 0.035, blue: 0.043)          // #09090B
-    static let card = Color(red: 0.075, green: 0.075, blue: 0.082)       // #131315
-    static let cardBorder = Color.white.opacity(0.08)
-    static let terminalBg = Color(red: 0.05, green: 0.05, blue: 0.055)   // #0D0D0F
-    static let text = Color(red: 0.98, green: 0.98, blue: 0.98)          // #FAFAFA
-    static let dim = Color(red: 0.63, green: 0.63, blue: 0.67)           // #A1A1AA
+    static let bg = Color(red: 0.11, green: 0.11, blue: 0.125)           // grafite suave
+    static let card = Color(red: 0.145, green: 0.145, blue: 0.16)
+    static let cardBorder = Color.white.opacity(0.09)
+    static let terminalBg = Color(red: 0.085, green: 0.085, blue: 0.098)
+    static let text = Color(red: 0.96, green: 0.96, blue: 0.96)
+    static let dim = Color(red: 0.66, green: 0.66, blue: 0.70)
     static let accent = Color(red: 0.8, green: 1.0, blue: 0.0)           // #CCFF00
-    static let cable = Color(red: 0.8, green: 1.0, blue: 0.0).opacity(0.3)
+    static let cable = Color(red: 0.8, green: 1.0, blue: 0.0).opacity(0.25)
     static let nevoa = Color(red: 0.8, green: 1.0, blue: 0.0)
 }
 
@@ -464,7 +464,7 @@ struct SmallButton: View {
     }
 }
 
-// cartao de passo do onboarding: diz ao usuario exatamente o que fazer agora
+// linha discreta de onboarding: aponta o proximo passo sem gritar
 struct StepCard: View {
     let step: String
     let title: String
@@ -473,26 +473,23 @@ struct StepCard: View {
     let buttonIcon: String
     let action: () -> Void
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 10) {
             Text(step)
-                .font(.system(size: 16, weight: .black, design: .monospaced))
-                .foregroundColor(Theme.bg)
-                .frame(width: 34, height: 34)
-                .background(Circle().fill(Theme.accent))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(.system(size: 13, weight: .bold)).foregroundColor(Theme.text)
-                Text(detail).font(.system(size: 11)).foregroundColor(Theme.dim)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(Theme.accent)
+                .frame(width: 16, height: 16)
+                .overlay(Circle().stroke(Theme.accent.opacity(0.6), lineWidth: 1))
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundColor(Theme.text)
+            Text(detail).font(.system(size: 10)).foregroundColor(Theme.dim)
+                .lineLimit(1).truncationMode(.tail)
+                .help(detail)
             Spacer()
             SmallButton(label: buttonLabel, icon: buttonIcon, tint: Theme.accent,
-                        prominent: true, action: action)
+                        help: detail, action: action)
         }
-        .padding(16)
-        .background(Theme.card)
-        .cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.accent.opacity(0.5),
-                                                           style: StrokeStyle(lineWidth: 1, dash: [5])))
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(Theme.card.opacity(0.7))
+        .cornerRadius(8)
         .frame(maxWidth: 760)
     }
 }
@@ -985,9 +982,7 @@ struct InitSheet: View {
     }
 }
 
-struct HelpSheet: View {
-    @Environment(\.dismiss) var dismiss
-
+struct HelpView: View {
     func row(_ icon: String, _ title: String, _ text: String, tint: Color = Theme.accent) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon).font(.system(size: 12)).foregroundColor(tint)
@@ -1001,15 +996,8 @@ struct HelpSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Como usar o orquestra").font(.system(size: 14, weight: .bold))
-                    .foregroundColor(Theme.text)
-                Spacer()
-                SmallButton(label: "fechar", icon: "xmark") { dismiss() }
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
                     Text("O FLUXO").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
                     row("folder", "1 · Escolha o projeto",
                         "Pasta local ou repositório do GitHub. Cada agente trabalha numa cópia isolada — nada muda no seu projeto sem sua aprovação.")
@@ -1029,17 +1017,47 @@ struct HelpSheet: View {
                     Divider().background(Theme.cardBorder)
                     Text("BOM SABER").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
                     row("bolt.fill", "Medidor de tokens",
-                        "A barra do topo mostra sua janela de 5h, quando reseta e o consumo do dia. Tarefas específicas gastam menos que pedidos vagos.")
+                        "A barra do topo mede o uso do Claude Code na sua máquina inteira (todas as sessões, não só os agentes daqui): janela de 5h, quando reseta e o total do dia. Os valores em $ são o equivalente em API — no plano Max é régua de consumo, não cobrança.")
                     row("dollarsign.circle", "Economize com modelos",
                         "No “novo agente”, escolha Sonnet pra construção (≈40% do custo do Opus) e deixe o Opus pra revisões críticas.")
                     row("shield.fill", "Segurança",
                         "Comandos perigosos (rm -rf, git push, acesso a .env e chaves) são bloqueados automaticamente. Descartar um agente preserva o trabalho numa branch.")
-                }
-                .padding(.vertical, 2)
+
+                    Divider().background(Theme.cardBorder)
+                    Text("DÚVIDAS FREQUENTES").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
+                    row("questionmark.circle", "O maestro pode estragar meu projeto?",
+                        "Não. Cada agente trabalha numa cópia isolada (git worktree). Seu projeto original só muda quando você clica em aprovar e confirma no Terminal.")
+                    row("questionmark.circle", "Fechei o app — perdi tudo?",
+                        "Não. Os agentes continuam rodando no tmux em segundo plano. Reabra o app e está tudo lá.")
+                    row("questionmark.circle", "Um agente travou, e agora?",
+                        "Leia as notas dele (botão notas), destrave mandando uma instrução no campo do card — ou descarte e crie outro com uma tarefa mais específica.")
+                    row("questionmark.circle", "Preciso saber git ou terminal?",
+                        "Quase nada: o único momento de terminal é a confirmação do aprovar, que já abre pronto — você só digita o nome do agente.")
+
+                    Divider().background(Theme.cardBorder)
+                    Text("SOBRE").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
+                    row("circle.hexagongrid.fill", "Orquestra",
+                        "Orquestrador local de agentes de código (Claude Code e Codex). Open source, licença MIT — github.com/rodrigolinss/orquestra")
+                    HStack {
+                        Spacer()
+                        Button {
+                            NSWorkspace.shared.open(URL(string:
+                                "https://nevoaai.com/?utm_source=orquestra&utm_medium=about_tab&utm_campaign=opensource_orchestrator")!)
+                        } label: {
+                            Text("powered by nevoaai.com")
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(Theme.nevoa)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { if $0 { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+                        Spacer()
+                    }
+                    .padding(.top, 6)
             }
+            .padding(24)
+            .frame(maxWidth: 620)
         }
-        .padding(18)
-        .frame(width: 520, height: 520)
+        .frame(maxWidth: .infinity)
         .background(Theme.bg)
     }
 }
@@ -1054,7 +1072,7 @@ struct ContentView: View {
     @State private var diffText = "carregando…"
     @State private var showFiles = false
     @State private var openFile: String?
-    @State private var showHelp = false
+    @State private var helpTab = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1077,12 +1095,29 @@ struct ContentView: View {
                 .onHover { inside in
                     if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
+                // abas: painel | ajuda · sobre
+                HStack(spacing: 2) {
+                    ForEach([false, true], id: \.self) { isHelp in
+                        Button {
+                            helpTab = isHelp
+                        } label: {
+                            Text(isHelp ? "ajuda · sobre" : "painel")
+                                .font(.system(size: 10, weight: helpTab == isHelp ? .semibold : .regular))
+                                .foregroundColor(helpTab == isHelp ? Theme.text : Theme.dim)
+                                .padding(.horizontal, 10).padding(.vertical, 4)
+                                .background(helpTab == isHelp ? Color.white.opacity(0.08) : .clear)
+                                .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.leading, 8)
                 if let repo = orch.repo {
                     Text(repo).font(.system(size: 10, design: .monospaced))
                         .foregroundColor(Theme.dim).lineLimit(1)
                 }
                 Spacer()
-                if orch.project != nil {
+                if !helpTab, orch.project != nil {
                     SmallButton(label: "arquivos", icon: "sidebar.left",
                                 tint: showFiles ? Theme.accent : Theme.dim,
                                 help: "abre o navegador de arquivos: veja o projeto e o que cada agente mexeu (bolinha verde = recente)") {
@@ -1090,42 +1125,45 @@ struct ContentView: View {
                         if !showFiles { openFile = nil }
                     }
                 }
-                SmallButton(label: "projeto", icon: "folder",
-                            help: "escolher a pasta ou repositório do GitHub em que a equipe vai trabalhar") { showInit = true }
-                SmallButton(label: "novo agente", icon: "plus", tint: Theme.accent,
-                            help: "cria um agente manualmente — ou peça ao maestro em português, que ele cria sozinho") { showNew = true }
-                SmallButton(label: "?", help: "guia rápido: como usar o orquestra") { showHelp = true }
+                if !helpTab {
+                    SmallButton(label: "projeto", icon: "folder",
+                                help: "escolher a pasta ou repositório do GitHub em que a equipe vai trabalhar") { showInit = true }
+                    SmallButton(label: "novo agente", icon: "plus", tint: Theme.accent,
+                                help: "cria um agente manualmente — ou peça ao maestro em português, que ele cria sozinho") { showNew = true }
+                }
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             .background(Theme.card)
 
-            // medidor de tokens: sessao 5h do plano, dia e modelos
-            if let u = orch.usage {
-                HStack(spacing: 14) {
-                    Image(systemName: "bolt.fill").font(.system(size: 8))
-                        .foregroundColor(Theme.accent)
+            // medidor: uso do Claude Code na maquina toda (nao so os agentes daqui)
+            if !helpTab, let u = orch.usage {
+                HStack(spacing: 12) {
+                    Text("uso claude code")
+                        .foregroundColor(Theme.dim.opacity(0.7))
                     if u.blockActive {
-                        Text("sessão: \(UsageInfo.fmt(u.blockTokens)) tok · ~$\(String(format: "%.2f", u.blockCost))")
+                        Text("janela 5h: \(UsageInfo.fmt(u.blockTokens)) tok · ~$\(String(format: "%.2f", u.blockCost))")
                         if let r = u.blockReset {
-                            Text("reseta \(r)").foregroundColor(Theme.accent.opacity(0.8))
+                            Text("reseta \(r)").foregroundColor(Theme.dim)
                         }
                     } else {
-                        Text("sessão: sem atividade na janela de 5h")
+                        Text("janela 5h: sem atividade")
                     }
                     Text("hoje: \(UsageInfo.fmt(u.todayTokens)) tok · ~$\(String(format: "%.2f", u.todayCost))")
                     if !u.models.isEmpty { Text(u.models) }
                     Spacer()
-                    Text("valores = equivalente API")
-                        .foregroundColor(Theme.dim.opacity(0.6))
                 }
                 .font(.system(size: 9, design: .monospaced))
                 .foregroundColor(Theme.dim)
-                .padding(.horizontal, 16).padding(.vertical, 5)
-                .background(Theme.card.opacity(0.6))
+                .padding(.horizontal, 16).padding(.vertical, 4)
+                .background(Theme.card.opacity(0.5))
+                .help("Mede TODO o uso do Claude Code nesta máquina (qualquer sessão, não só os agentes do orquestra). Valores em $ são equivalente de API — no plano Max é régua de consumo, não cobrança. A janela de 5h é o ciclo do plano.")
             }
 
             Divider().background(Theme.cardBorder)
 
+            if helpTab {
+                HelpView()
+            } else {
             HStack(spacing: 0) {
             if showFiles {
                 FileBrowser(orch: orch) { openFile = $0 }
@@ -1202,6 +1240,7 @@ struct ContentView: View {
                 FileViewer(path: f) { openFile = nil }
             }
             }
+            }
         }
         .background(Theme.bg)
         .preferredColorScheme(.dark)
@@ -1218,7 +1257,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showNew) { NewAgentSheet(orch: orch) }
         .sheet(isPresented: $showInit) { InitSheet(orch: orch) }
-        .sheet(isPresented: $showHelp) { HelpSheet() }
     }
 }
 

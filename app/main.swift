@@ -399,8 +399,17 @@ struct TerminalText: View {
 
 struct PromptField: View {
     let placeholder: String
+    @Binding var text: String
+    var submitLabel: String = "enviar"
     let onSubmit: (String) -> Void
-    @State private var text = ""
+
+    private func submit() {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return }
+        onSubmit(t)
+        text = ""
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "chevron.right").font(.system(size: 9, weight: .bold))
@@ -409,12 +418,21 @@ struct PromptField: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundColor(Theme.text)
-                .onSubmit {
-                    let t = text.trimmingCharacters(in: .whitespaces)
-                    guard !t.isEmpty else { return }
-                    onSubmit(t)
-                    text = ""
+                .onSubmit { submit() }
+            if !text.trimmingCharacters(in: .whitespaces).isEmpty {
+                Button(action: submit) {
+                    HStack(spacing: 3) {
+                        Text(submitLabel).font(.system(size: 9, weight: .semibold))
+                        Image(systemName: "paperplane.fill").font(.system(size: 8))
+                    }
+                    .foregroundColor(Theme.bg)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Theme.accent)
+                    .cornerRadius(4)
                 }
+                .buttonStyle(.plain)
+                .help("enviar (ou tecle Enter)")
+            }
         }
         .padding(.horizontal, 8).padding(.vertical, 6)
         .background(Theme.terminalBg)
@@ -427,6 +445,8 @@ struct SmallButton: View {
     let label: String
     var icon: String? = nil
     var tint: Color = Theme.dim
+    var help: String? = nil
+    var prominent: Bool = false
     let action: () -> Void
     var body: some View {
         Button(action: action) {
@@ -434,12 +454,46 @@ struct SmallButton: View {
                 if let icon = icon { Image(systemName: icon).font(.system(size: 9)) }
                 Text(label).font(.system(size: 10, weight: .medium))
             }
-            .foregroundColor(tint)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.white.opacity(0.06))
+            .foregroundColor(prominent ? Theme.bg : tint)
+            .padding(.horizontal, prominent ? 12 : 8).padding(.vertical, prominent ? 6 : 4)
+            .background(prominent ? Theme.accent : Color.white.opacity(0.06))
             .cornerRadius(5)
         }
         .buttonStyle(.plain)
+        .help(help ?? label)
+    }
+}
+
+// cartao de passo do onboarding: diz ao usuario exatamente o que fazer agora
+struct StepCard: View {
+    let step: String
+    let title: String
+    let detail: String
+    let buttonLabel: String
+    let buttonIcon: String
+    let action: () -> Void
+    var body: some View {
+        HStack(spacing: 14) {
+            Text(step)
+                .font(.system(size: 16, weight: .black, design: .monospaced))
+                .foregroundColor(Theme.bg)
+                .frame(width: 34, height: 34)
+                .background(Circle().fill(Theme.accent))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .bold)).foregroundColor(Theme.text)
+                Text(detail).font(.system(size: 11)).foregroundColor(Theme.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            SmallButton(label: buttonLabel, icon: buttonIcon, tint: Theme.accent,
+                        prominent: true, action: action)
+        }
+        .padding(16)
+        .background(Theme.card)
+        .cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.accent.opacity(0.5),
+                                                           style: StrokeStyle(lineWidth: 1, dash: [5])))
+        .frame(maxWidth: 760)
     }
 }
 
@@ -447,27 +501,61 @@ struct SmallButton: View {
 
 struct MaestroNode: View {
     @ObservedObject var orch: Orchestra
+    @State private var draft = ""
+
+    private let examples: [(String, String)] = [
+        ("👷 criar equipe", "cria um agente builder pra implementar [descreva a funcionalidade] e um agente reviewer pra auditar o trabalho dele. Me avisa quando os dois terminarem."),
+        ("📋 ver progresso", "o que os agentes estão fazendo? Lê as notas de cada um e me dá um resumo curto."),
+        ("🧹 corrigir rumo", "manda o agente builder priorizar [o que importa] antes de continuar o resto."),
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Circle().fill(Theme.accent).frame(width: 8, height: 8)
+                Circle().fill(orch.maestroRunning ? Theme.accent : Theme.dim)
+                    .frame(width: 8, height: 8)
                 Text("MAESTRO").font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundColor(Theme.accent)
-                Text(orch.project.map { "· \($0)" } ?? "· nenhum projeto (nvo init)")
+                    .help("o agente chefe: você fala com ele em português e ele cria e gerencia os outros agentes")
+                Text(orch.project.map { "· \($0)" } ?? "")
                     .font(.system(size: 11, design: .monospaced)).foregroundColor(Theme.dim)
                 Spacer()
                 if !orch.maestroRunning {
-                    SmallButton(label: "iniciar claude", icon: "play.fill", tint: Theme.accent) {
+                    SmallButton(label: "iniciar maestro", icon: "play.fill", tint: Theme.accent,
+                                help: "abre o Claude Code na janela do maestro — é ele quem orquestra",
+                                prominent: true) {
                         orch.startMaestro()
                     }
                 }
-                SmallButton(label: "abrir no Terminal", icon: "terminal") {
+                SmallButton(label: "ver ao vivo", icon: "terminal",
+                            help: "abre o Terminal com todas as janelas (tmux). Sair: Ctrl-b depois d") {
                     openTerminal("tmux attach -t orquestra")
                 }
             }
-            TerminalText(content: orch.maestroPane, size: 11)
+            TerminalText(content: orch.maestroPane.isEmpty
+                         ? "o terminal do maestro aparece aqui quando você iniciar"
+                         : orch.maestroPane, size: 11)
                 .frame(height: 210)
-            PromptField(placeholder: "fale com o maestro… ex: cria um agente builder pra implementar X e um reviewer pra auditar") { t in
+            if orch.maestroRunning && orch.agents.isEmpty && draft.isEmpty {
+                HStack(spacing: 6) {
+                    Text("experimente:").font(.system(size: 9)).foregroundColor(Theme.dim)
+                    ForEach(examples, id: \.0) { ex in
+                        Button {
+                            draft = ex.1
+                        } label: {
+                            Text(ex.0).font(.system(size: 9, weight: .medium))
+                                .foregroundColor(Theme.accent)
+                                .padding(.horizontal, 7).padding(.vertical, 3)
+                                .background(Theme.accent.opacity(0.1))
+                                .cornerRadius(9)
+                        }
+                        .buttonStyle(.plain)
+                        .help(ex.1)
+                    }
+                }
+            }
+            PromptField(placeholder: "escreva em português o que você quer que a equipe faça…",
+                        text: $draft) { t in
                 orch.sendMaestro(t)
             }
         }
@@ -486,6 +574,7 @@ struct AgentNode: View {
     let onNotes: () -> Void
     let onDiff: () -> Void
     let onKill: () -> Void
+    @State private var draft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -497,25 +586,40 @@ struct AgentNode: View {
                     .foregroundColor(agent.status.color)
                     .padding(.horizontal, 5).padding(.vertical, 1)
                     .background(agent.status.color.opacity(0.12)).cornerRadius(4)
+                    .help(agent.status == .concluido
+                          ? "o agente escreveu STATUS: CONCLUIDO nas notas — revise o diff e aprove"
+                          : agent.status == .bloqueado
+                          ? "o agente relatou um bloqueio — leia as notas e destrave ele"
+                          : "o agente está trabalhando — acompanhe pela tela ou pelas notas")
                 Spacer()
-                Text("\(agent.changes) arq.").font(.system(size: 9, design: .monospaced))
+                Text("\(agent.changes) arq. alterados")
+                    .font(.system(size: 9, design: .monospaced))
                     .foregroundColor(Theme.dim)
+                    .help("arquivos modificados no espaço isolado deste agente")
             }
             Text("\(agent.branch)  ·  \(agent.cli)\(agent.model.isEmpty ? "" : " · \(agent.model)")")
                 .font(.system(size: 9, design: .monospaced)).foregroundColor(Theme.dim)
             TerminalText(content: agent.pane).frame(height: 120)
-            PromptField(placeholder: "prompt para \(agent.name)…") { t in
+            PromptField(placeholder: "mandar instrução para \(agent.name)…", text: $draft) { t in
                 orch.sendAgent(agent.name, t)
             }
             HStack(spacing: 6) {
-                SmallButton(label: "notas", icon: "note.text", action: onNotes)
-                SmallButton(label: "diff", icon: "plus.forwardslash.minus", action: onDiff)
+                SmallButton(label: "notas", icon: "note.text",
+                            help: "diário de progresso que o agente escreve — a forma mais rápida de saber onde ele está",
+                            action: onNotes)
+                SmallButton(label: "diff", icon: "plus.forwardslash.minus",
+                            help: "todas as mudanças de código que o agente fez, comparadas com o projeto original",
+                            action: onDiff)
                 Spacer()
-                SmallButton(label: "done", icon: "checkmark.seal",
-                            tint: AgentStatus.concluido.color) {
+                SmallButton(label: "aprovar", icon: "checkmark.seal",
+                            tint: AgentStatus.concluido.color,
+                            help: "aplica o trabalho no projeto (merge). Abre o Terminal: você revê o diff e confirma digitando o nome do agente — segurança de verdade") {
                     openTerminal("export PATH=\"$HOME/orquestra/bin:$PATH\"; nvo done \(agent.name)")
                 }
-                SmallButton(label: "kill", icon: "xmark", tint: AgentStatus.bloqueado.color, action: onKill)
+                SmallButton(label: "descartar", icon: "xmark",
+                            tint: AgentStatus.bloqueado.color,
+                            help: "encerra o agente sem aplicar nada. O trabalho fica guardado numa branch, dá pra recuperar",
+                            action: onKill)
             }
         }
         .padding(12)
@@ -881,6 +985,65 @@ struct InitSheet: View {
     }
 }
 
+struct HelpSheet: View {
+    @Environment(\.dismiss) var dismiss
+
+    func row(_ icon: String, _ title: String, _ text: String, tint: Color = Theme.accent) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon).font(.system(size: 12)).foregroundColor(tint)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 11, weight: .bold)).foregroundColor(Theme.text)
+                Text(text).font(.system(size: 10.5)).foregroundColor(Theme.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Como usar o orquestra").font(.system(size: 14, weight: .bold))
+                    .foregroundColor(Theme.text)
+                Spacer()
+                SmallButton(label: "fechar", icon: "xmark") { dismiss() }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("O FLUXO").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
+                    row("folder", "1 · Escolha o projeto",
+                        "Pasta local ou repositório do GitHub. Cada agente trabalha numa cópia isolada — nada muda no seu projeto sem sua aprovação.")
+                    row("play.fill", "2 · Inicie o maestro",
+                        "Fale com ele em português: “cria um builder pra fazer X e um reviewer pra auditar”. Ele cria e coordena os agentes sozinho.")
+                    row("person.3.fill", "3 · Acompanhe os agentes",
+                        "Cada card mostra a tela ao vivo. Você recebe notificação do macOS quando alguém termina ou trava.")
+                    row("checkmark.seal", "4 · Revise e aprove",
+                        "Terminou? Clique em diff pra ver o trabalho e em aprovar pra aplicar no projeto. A confirmação final é digitada no Terminal — merge nunca é automático.")
+
+                    Divider().background(Theme.cardBorder)
+                    Text("OS STATUS").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
+                    row("circle.fill", "cinza — trabalhando", "o agente está executando a tarefa", tint: Theme.dim)
+                    row("circle.fill", "verde — concluído", "hora de revisar o diff e aprovar", tint: AgentStatus.concluido.color)
+                    row("circle.fill", "vermelho — bloqueado", "o agente precisa de você; leia as notas dele", tint: AgentStatus.bloqueado.color)
+
+                    Divider().background(Theme.cardBorder)
+                    Text("BOM SABER").font(.system(size: 9, weight: .black)).foregroundColor(Theme.accent)
+                    row("bolt.fill", "Medidor de tokens",
+                        "A barra do topo mostra sua janela de 5h, quando reseta e o consumo do dia. Tarefas específicas gastam menos que pedidos vagos.")
+                    row("dollarsign.circle", "Economize com modelos",
+                        "No “novo agente”, escolha Sonnet pra construção (≈40% do custo do Opus) e deixe o Opus pra revisões críticas.")
+                    row("shield.fill", "Segurança",
+                        "Comandos perigosos (rm -rf, git push, acesso a .env e chaves) são bloqueados automaticamente. Descartar um agente preserva o trabalho numa branch.")
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(18)
+        .frame(width: 520, height: 520)
+        .background(Theme.bg)
+    }
+}
+
 // MARK: - Tela principal
 
 struct ContentView: View {
@@ -891,6 +1054,7 @@ struct ContentView: View {
     @State private var diffText = "carregando…"
     @State private var showFiles = false
     @State private var openFile: String?
+    @State private var showHelp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -920,13 +1084,17 @@ struct ContentView: View {
                 Spacer()
                 if orch.project != nil {
                     SmallButton(label: "arquivos", icon: "sidebar.left",
-                                tint: showFiles ? Theme.accent : Theme.dim) {
+                                tint: showFiles ? Theme.accent : Theme.dim,
+                                help: "abre o navegador de arquivos: veja o projeto e o que cada agente mexeu (bolinha verde = recente)") {
                         showFiles.toggle()
                         if !showFiles { openFile = nil }
                     }
                 }
-                SmallButton(label: "projeto", icon: "folder") { showInit = true }
-                SmallButton(label: "novo agente", icon: "plus", tint: Theme.accent) { showNew = true }
+                SmallButton(label: "projeto", icon: "folder",
+                            help: "escolher a pasta ou repositório do GitHub em que a equipe vai trabalhar") { showInit = true }
+                SmallButton(label: "novo agente", icon: "plus", tint: Theme.accent,
+                            help: "cria um agente manualmente — ou peça ao maestro em português, que ele cria sozinho") { showNew = true }
+                SmallButton(label: "?", help: "guia rápido: como usar o orquestra") { showHelp = true }
             }
             .padding(.horizontal, 16).padding(.vertical, 10)
             .background(Theme.card)
@@ -964,13 +1132,33 @@ struct ContentView: View {
                 Divider().background(Theme.cardBorder)
             }
             ScrollView {
-                VStack(spacing: 56) {
+                VStack(spacing: 40) {
+                    // onboarding: o proximo passo sempre visivel
+                    if orch.project == nil {
+                        StepCard(step: "1",
+                                 title: "Escolha o projeto",
+                                 detail: "Uma pasta do seu Mac ou um repositório do GitHub. Os agentes só trabalham dentro dele, cada um numa cópia isolada — seus arquivos ficam intactos até você aprovar.",
+                                 buttonLabel: "escolher projeto", buttonIcon: "folder") {
+                            showInit = true
+                        }
+                    } else if !orch.maestroRunning {
+                        StepCard(step: "2",
+                                 title: "Inicie o maestro",
+                                 detail: "O maestro é o agente chefe: você fala com ele em português e ele cria, acompanha e coordena os agentes que constroem de verdade.",
+                                 buttonLabel: "iniciar maestro", buttonIcon: "play.fill") {
+                            orch.startMaestro()
+                        }
+                    }
                     MaestroNode(orch: orch)
                     if orch.agents.isEmpty {
-                        Text("nenhum agente ativo — peça ao maestro ou clique em “novo agente”")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(Theme.dim)
-                            .padding(.bottom, 40)
+                        VStack(spacing: 6) {
+                            Text(orch.maestroRunning
+                                 ? "3º passo: peça uma equipe ao maestro no campo acima — ou use os exemplos"
+                                 : "os agentes que o maestro criar aparecem aqui, conectados a ele")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(Theme.dim)
+                        }
+                        .padding(.bottom, 40)
                     } else {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 340, maximum: 360), spacing: 24)],
                                   spacing: 24) {
@@ -1030,6 +1218,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showNew) { NewAgentSheet(orch: orch) }
         .sheet(isPresented: $showInit) { InitSheet(orch: orch) }
+        .sheet(isPresented: $showHelp) { HelpSheet() }
     }
 }
 

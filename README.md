@@ -69,7 +69,7 @@ Running 3–4 AI agents in loose terminals turns you into a copy-paste router. O
 **Requirements:** macOS with [Homebrew](https://brew.sh). At least one agent CLI ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [Codex](https://github.com/openai/codex)) installed and logged in.
 
 ```bash
-git clone https://github.com/YOUR-USER/orquestra.git ~/orquestra
+git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
 cd ~/orquestra && ./install.sh
 ```
 

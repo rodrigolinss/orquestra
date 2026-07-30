@@ -204,12 +204,17 @@ ensure_session() {
 # instala o hook de seguranca num diretorio de trabalho, sem sujar o git do
 # usuario (settings.local.json + .git/info/exclude)
 install_guard_local() {
-  local d="$1" ex
+  local d="$1" gitdir ex
   mkdir -p "$d/.claude"
   cp "$ORQ/.claude/settings.json" "$d/.claude/settings.local.json" 2>/dev/null || return 0
-  ex="$(git -C "$d" rev-parse --git-path info/exclude 2>/dev/null)" || return 0
-  [ -n "$ex" ] || return 0
-  mkdir -p "$(dirname "$ex")"
+  # --git-common-dir pode voltar caminho RELATIVO (ex.: ".git"); quando o nvo
+  # e chamado pelo app o cwd e "/" e um mkdir relativo estoura em sistema
+  # somente leitura — por isso ancoramos no diretorio do projeto
+  gitdir="$(git -C "$d" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  [ -n "$gitdir" ] || return 0
+  case "$gitdir" in /*) ;; *) gitdir="$d/$gitdir" ;; esac
+  ex="$gitdir/info/exclude"
+  mkdir -p "$gitdir/info" 2>/dev/null || return 0
   grep -q 'claude/settings.local.json' "$ex" 2>/dev/null \
     || printf '\n# orquestra (local, nao versionar)\n.claude/settings.local.json\n' >> "$ex"
 }
@@ -416,12 +421,29 @@ agent_status() {
 }
 
 cmd_maestro() {
+  # nvo maestro [harness] [modelo] — o orquestrador tambem tem dono de modelo:
+  # quem paga a conta escolhe o cerebro do chefe; os workers ele dosa sozinho.
+  local mcli="${1:-claude}" mmodel="${2:-}"
+  harness_exists "$mcli" || die \
+    "harness '$mcli' desconhecido. Disponiveis: $(cmd_harnesses | cut -f1 | tr '\n' ' ')"
+  local mbin; mbin="$(harness_field "$mcli" 3)"
+  command -v "$mbin" >/dev/null 2>&1 || die \
+    "'$mbin' nao esta instalado (harness $mcli). $(harness_field "$mcli" 7)"
+  [ -z "$mmodel" ] || printf '%s' "$mmodel" | grep -Eq '^[A-Za-z0-9._/-]+$' \
+    || die "modelo invalido '$mmodel'"
+  local mlaunch; mlaunch="$(harness_launch "$mcli" "$mmodel")"
+
   load_project
   ensure_session
   local brief="$META_ROOT/$PROJ.maestro.txt"
   mkdir -p "$META_ROOT"
   # o maestro tambem roda com o guard, no diretorio do projeto
   install_guard_local "$REPO"
+  # o briefing lista so os harnesses INSTALADOS: o maestro escolhe entre o que
+  # existe de fato na maquina, em vez de chutar e ver o comando falhar
+  local harness_list
+  harness_list="$(cmd_harnesses | awk -F'\t' '$3==1 {printf "  %s — modelos: %s\n", $1, $4}')"
+  [ -n "$harness_list" ] || harness_list="  claude"
   cat > "$brief" <<EOF
 Voce e o MAESTRO do orquestra: um orquestrador de agentes de codigo.
 
@@ -438,8 +460,13 @@ divisao. O limite e $NVO_MAX_DEPTH camadas, $NVO_MAX_FANOUT filhos por agente e 
 Prefira delegar em profundidade so quando a tarefa tem partes independentes de
 verdade: cada camada custa contexto e afasta o trabalho de quem pediu.
 
+HARNESSES DISPONIVEIS NESTA MAQUINA (a CLI que roda cada agente):
+$harness_list
+Escolha por tarefa. So use os listados acima — outros nao estao instalados e
+o comando falha.
+
 SUAS FERRAMENTAS (rode pelo Bash):
-  nvo new [--plan] [--parent <nome>] <nome> "<tarefa>" [claude|codex] [modelo]
+  nvo new [--plan] [--parent <nome>] <nome> "<tarefa>" [harness] [modelo]
         cria um agente. Use --plan quando a tarefa for grande ou ambigua: o
         agente escreve um plano e espera aprovacao antes de escrever codigo.
         Modelo: use "sonnet" para construcao (bem mais barato) e reserve o

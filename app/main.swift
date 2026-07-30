@@ -306,6 +306,49 @@ final class Orchestra: ObservableObject {
     private var timer: Timer?
     private var usageTimer: Timer?
 
+    // -- avisos e autonomia ---------------------------------------------------
+    // som suave quando alguem pede resposta; liberdade = responder "1" sozinho
+    @Published var soundOn: Bool = UserDefaults.standard.object(forKey: "aviso.som") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(soundOn, forKey: "aviso.som") }
+    }
+    @Published var autoYes: Bool = UserDefaults.standard.bool(forKey: "modo.liberdade") {
+        didSet { UserDefaults.standard.set(autoYes, forKey: "modo.liberdade") }
+    }
+    private var lastPromptSig: [String: String] = [:]   // por janela: prompt ja avisado
+    private var lastAutoAnswer: [String: Date] = [:]    // por assinatura: quando respondemos
+
+    // "Purr" e o som mais discreto do sistema; volume baixo de proposito.
+    // Instancia nova a cada toque: play() num som ainda tocando nao toca.
+    static func somSuave() {
+        guard let s = NSSound(named: "Purr") else { return }
+        s.volume = 0.35
+        s.play()
+    }
+
+    // Roda a cada refresh, na main. Toca o aviso so na TRANSICAO para "pedindo
+    // resposta" (assinatura nova), nunca a cada ciclo. No modo liberdade,
+    // responde "1" — a opcao afirmativa padrao do Claude Code — com trava de
+    // 8s por assinatura para nao mandar "1" duas vezes enquanto a tela atualiza.
+    private func processarPrompt(janela: String, pane: String) {
+        let p = PanePrompt(pane: pane)
+        guard p.isAsking else {
+            lastPromptSig[janela] = nil
+            return
+        }
+        let sig = janela + "|" + p.options.map { $0.key + $0.label }.joined()
+        let novo = lastPromptSig[janela] != sig
+        lastPromptSig[janela] = sig
+
+        if autoYes {
+            let agora = Date()
+            if let ultima = lastAutoAnswer[sig], agora.timeIntervalSince(ultima) < 8 { return }
+            lastAutoAnswer[sig] = agora
+            sendLiteral(janela, "1")
+        } else if novo, soundOn {
+            Orchestra.somSuave()
+        }
+    }
+
     // Quais CLIs de agente existem, vindas do registro do nvo — assim adicionar
     // um harness novo e editar um arquivo de texto, sem tocar no app.
     func refreshHarnesses() {
@@ -516,6 +559,9 @@ final class Orchestra: ObservableObject {
                 self.agents = list
                 self.maestroPane = maestro
                 self.maestroRunning = running
+                // aviso sonoro / modo liberdade: maestro e todos os agentes
+                self.processarPrompt(janela: "maestro", pane: maestro)
+                for a in list { self.processarPrompt(janela: a.name, pane: a.pane) }
             }
         }
     }
@@ -1002,9 +1048,11 @@ struct MaestroNode: View {
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { v in
+                                // divide pelo zoom: o card segue o cursor 1:1
+                                // em qualquer escala do canvas
                                 layout.moveMaestro(by: CGSize(
-                                    width: v.translation.width - lastDrag.width,
-                                    height: v.translation.height - lastDrag.height))
+                                    width: (v.translation.width - lastDrag.width) / layout.zoom,
+                                    height: (v.translation.height - lastDrag.height) / layout.zoom))
                                 lastDrag = v.translation
                                 dragging = true
                             }
@@ -1110,8 +1158,8 @@ struct MaestroNode: View {
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
                         .onChanged { v in
                             layout.resizeMaestro(by: CGSize(
-                                width: v.translation.width - lastResize.width,
-                                height: v.translation.height - lastResize.height))
+                                width: (v.translation.width - lastResize.width) / layout.zoom,
+                                height: (v.translation.height - lastResize.height) / layout.zoom))
                             lastResize = v.translation
                             resizing = true
                         }
@@ -1171,6 +1219,16 @@ final class AgentLayout: ObservableObject {
     // da janela para o arranjo inicial nascer centralizado. So afeta cards que
     // o usuario nunca moveu — posicao arrastada e absoluta e nao se mexe.
     @Published var originX: CGFloat = 0
+
+    // zoom do canvas (estilo Figma): pinca no trackpad, ⌘− / ⌘= ou os botoes
+    // do topo. Persistido entre sessoes.
+    @Published var zoom: CGFloat = UserDefaults.standard.object(forKey: "ui.canvasZoom")
+        .flatMap { $0 as? Double }.map { CGFloat($0) } ?? 1.0
+
+    func setZoom(_ z: CGFloat) {
+        zoom = min(2.0, max(0.3, z))
+        UserDefaults.standard.set(Double(zoom), forKey: "ui.canvasZoom")
+    }
 
     private init() {
         guard let raw = UserDefaults.standard.dictionary(forKey: Self.key) as? [String: [Double]]
@@ -1307,9 +1365,11 @@ struct AgentNode: View {
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { v in
+                                // divide pelo zoom: o card segue o cursor 1:1
+                                // em qualquer escala do canvas
                                 layout.move(agent.name, index: index, by: CGSize(
-                                    width: v.translation.width - lastDrag.width,
-                                    height: v.translation.height - lastDrag.height))
+                                    width: (v.translation.width - lastDrag.width) / layout.zoom,
+                                    height: (v.translation.height - lastDrag.height) / layout.zoom))
                                 lastDrag = v.translation
                                 dragging = true
                             }
@@ -1453,8 +1513,8 @@ struct AgentNode: View {
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
                         .onChanged { v in
                             layout.resize(agent.name, index: index, by: CGSize(
-                                width: v.translation.width - lastResize.width,
-                                height: v.translation.height - lastResize.height))
+                                width: (v.translation.width - lastResize.width) / layout.zoom,
+                                height: (v.translation.height - lastResize.height) / layout.zoom))
                             lastResize = v.translation
                             resizing = true
                         }
@@ -1776,6 +1836,61 @@ struct AjustesView: View {
                             }
                             Spacer()
                         }
+                    }
+                }
+
+                secao("Avisos e autonomia",
+                      "Como o orquestra chama a sua atenção — e o quanto ele decide sozinho.") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Toggle(isOn: Binding(get: { orch.soundOn }, set: { orch.soundOn = $0 })) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("aviso sonoro").font(.system(size: Theme.uiSize(11), weight: .semibold))
+                                        .foregroundColor(Theme.text)
+                                    Text("um toque bem suave quando o maestro ou um agente fica esperando a sua resposta — só na hora em que a pergunta aparece, nunca repetido")
+                                        .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                            Spacer()
+                            SmallButton(label: "ouvir", icon: "speaker.wave.1",
+                                        help: "toca o aviso uma vez, para você calibrar") {
+                                Orchestra.somSuave()
+                            }
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .background(Color.white.opacity(0.035)).cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.cardBorder))
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle(isOn: Binding(get: { orch.autoYes }, set: { orch.autoYes = $0 })) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("modo liberdade — concordar com tudo")
+                                        .font(.system(size: Theme.uiSize(11), weight: .semibold))
+                                        .foregroundColor(Theme.text)
+                                    Text("quando um agente pedir permissão, o orquestra responde “sim” sozinho, para todos. O firewall (guard.sh) continua bloqueando comandos destrutivos, e aplicar trabalho no projeto continua exigindo a sua confirmação digitada.")
+                                        .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                            if orch.autoYes {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.system(size: Theme.uiSize(9)))
+                                        .foregroundColor(Theme.accent)
+                                    Text("ativo — os agentes estão com carta branca; acompanhe pelas notas e pelo diff antes de aprovar")
+                                        .font(.system(size: Theme.uiSize(9)))
+                                        .foregroundColor(Theme.accent)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .background(orch.autoYes ? Theme.accent.opacity(0.06) : Color.white.opacity(0.035))
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6)
+                            .stroke(orch.autoYes ? Theme.accent.opacity(0.4) : Theme.cardBorder))
                     }
                 }
 
@@ -2446,6 +2561,7 @@ struct ContentView: View {
     @State private var showFiles = false
     @State private var openFile: String?
     @State private var tab: Aba = .painel
+    @State private var pinchBase: CGFloat = 0
     @ObservedObject private var scale = UIScale.shared
     @ObservedObject private var layout = AgentLayout.shared
 
@@ -2490,6 +2606,21 @@ struct ContentView: View {
                         .foregroundColor(Theme.dim).lineLimit(1)
                 }
                 Spacer()
+                // liberdade ligada tem que ficar a vista o tempo todo: e o modo
+                // em que os agentes decidem sozinhos
+                if orch.autoYes {
+                    Button { tab = .ajustes } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.fill").font(.system(size: Theme.uiSize(8)))
+                            Text("liberdade").font(.system(size: Theme.uiSize(9), weight: .semibold))
+                        }
+                        .foregroundColor(Theme.bg)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Theme.accent).cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("modo liberdade ativo: os agentes recebem “sim” automático. Clique para ajustar.")
+                }
                 // zoom da interface — tipografia pequena era reclamacao legitima
                 HStack(spacing: 2) {
                     Button(action: { scale.zoomOut() }) {
@@ -2521,6 +2652,42 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.05))
                 .cornerRadius(5)
 
+                if tab == .painel {
+                    // zoom do canvas: − / % / +  (⌘− e ⌘= no teclado, pinça no trackpad)
+                    HStack(spacing: 2) {
+                        Button { layout.setZoom(layout.zoom - 0.1) } label: {
+                            Image(systemName: "minus.magnifyingglass")
+                                .font(.system(size: Theme.uiSize(9)))
+                                .foregroundColor(Theme.dim)
+                                .padding(.horizontal, 5).padding(.vertical, 4)
+                                .background(Color.white.opacity(0.06)).cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut("-", modifiers: .command)
+                        .help("afastar o canvas (⌘−)")
+                        Button { layout.setZoom(1.0) } label: {
+                            Text("\(Int(layout.zoom * 100))%")
+                                .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                                .foregroundColor(abs(layout.zoom - 1.0) < 0.01 ? Theme.dim : Theme.accent)
+                                .frame(minWidth: 34)
+                                .padding(.vertical, 4)
+                                .background(Color.white.opacity(0.06)).cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut("0", modifiers: .command)
+                        .help("zoom do canvas — clique para voltar a 100% (⌘0)")
+                        Button { layout.setZoom(layout.zoom + 0.1) } label: {
+                            Image(systemName: "plus.magnifyingglass")
+                                .font(.system(size: Theme.uiSize(9)))
+                                .foregroundColor(Theme.dim)
+                                .padding(.horizontal, 5).padding(.vertical, 4)
+                                .background(Color.white.opacity(0.06)).cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut("=", modifiers: .command)
+                        .help("aproximar o canvas (⌘=)")
+                    }
+                }
                 if tab == .painel, layout.isCustomized {
                     SmallButton(label: "realinhar", icon: "square.grid.2x2",
                                 help: "devolve todos os cards ao tamanho e à posição automáticos") {
@@ -2717,6 +2884,12 @@ struct ContentView: View {
                         }
                         .allowsHitTesting(false)
                     }
+                    // zoom do canvas: escala visual a partir do canto e ajusta o
+                    // tamanho do conteudo, para a rolagem cobrir a area escalada
+                    .scaleEffect(layout.zoom, anchor: .topLeading)
+                    .frame(width: canvas.width * layout.zoom,
+                           height: canvas.height * layout.zoom,
+                           alignment: .topLeading)
                 }
                 .padding(.vertical, 32)
                 .padding(.horizontal, 24)
@@ -2736,6 +2909,15 @@ struct ContentView: View {
                     layout.originX = max(0, (w - 48 - 1076) / 2)
                 }
             }
+            // pinca do trackpad: zoom incremental em cima do valor atual
+            .simultaneousGesture(
+                MagnificationGesture()
+                    .onChanged { value in
+                        if pinchBase == 0 { pinchBase = layout.zoom }
+                        layout.setZoom(pinchBase * value)
+                    }
+                    .onEnded { _ in pinchBase = 0 }
+            )
             }
             .background(Theme.bg)
             if let f = openFile {

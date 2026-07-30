@@ -171,6 +171,10 @@ nvo — orquestrador local de agentes Claude Code
   nvo projects                 lista os projetos ja usados e agentes vivos
   nvo stop [--forget-project]  encerra a sessao (maestro e agentes) preservando
                                worktrees, branches, notas e o projeto ativo
+  nvo limpar [--descartar-agentes]
+                               recomeco: maestro novo e quadro em branco. As
+                               notas vao para _arquivo/<data>; o git fica
+                               intacto. Recusa se houver trabalho nao aplicado
   nvo harnesses                lista as CLIs de agente e quais estao instaladas
   nvo config [<chave> <valor>] le ou ajusta os limites da equipe
                                (max_depth, max_fanout, max_agents)
@@ -494,6 +498,53 @@ agent_status() {
     *BLOQUE*)     echo bloqueado ;;
     *)            echo trabalhando ;;
   esac
+}
+
+# Recomecar do zero neste projeto: maestro novo, quadro em branco, painel
+# limpo. Nada e apagado de verdade — as notas vao para _arquivo/<data>, e o
+# git (branches e commits) nao e tocado em nenhum caso.
+cmd_limpar() {
+  local descartar=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --descartar-agentes) descartar=1; shift ;;
+      *) die "uso: nvo limpar [--descartar-agentes]" ;;
+    esac
+  done
+  load_project
+
+  # Agente vivo e trabalho nao aplicado. Nunca jogamos isso fora por conta
+  # propria: ou a pessoa aprova, ou pede explicitamente para descartar.
+  local vivos=""
+  [ -d "$WT_ROOT/$PROJ" ] && vivos="$(ls -1 "$WT_ROOT/$PROJ" 2>/dev/null || true)"
+  if [ -n "$vivos" ] && [ "$descartar" -eq 0 ]; then
+    echo "nvo: ha agente com trabalho ainda nao aplicado:" >&2
+    printf '  - %s\n' $vivos >&2
+    echo "aprove (nvo done <nome>) ou repita com --descartar-agentes" >&2
+    exit 1
+  fi
+  local a
+  for a in $vivos; do
+    cmd_kill "$a" >/dev/null 2>&1 || true
+    echo "descartado: $a (a branch agent/$a continua no git)"
+  done
+
+  # As notas viram historico, nao lixo: se voce precisar do que a equipe
+  # anterior escreveu, esta tudo em _arquivo com a data.
+  local nd="$NOTES_ROOT/$PROJ"
+  if [ -d "$nd" ] && [ -n "$(find "$nd" -maxdepth 1 -name '*.md' -print -quit 2>/dev/null)" ]; then
+    local stamp arq
+    stamp="$(date +%Y-%m-%d-%H%M%S)"
+    arq="$nd/_arquivo/$stamp"
+    mkdir -p "$arq"
+    find "$nd" -maxdepth 1 -name '*.md' -exec mv {} "$arq"/ \;
+    echo "notas e quadro arquivados em $arq"
+  fi
+
+  # maestro do zero: janela derrubada, briefing regravado no proximo start
+  tmux kill-window -t "$SESSION:maestro" 2>/dev/null || true
+  rm -f "$META_ROOT/$PROJ.maestro.txt"
+  echo "painel limpo. Inicie o maestro novo pelo app, ou: nvo maestro"
 }
 
 cmd_maestro() {
@@ -1037,6 +1088,7 @@ case "${1:-}" in
   attach)  shift; cmd_attach "$@" ;;
   maestro) shift; cmd_maestro "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
+  limpar)  shift; cmd_limpar "$@" ;;
   harnesses) shift; cmd_harnesses "$@" ;;
   config)  shift; cmd_config "$@" ;;
   approve) shift; cmd_approve "$@" ;;

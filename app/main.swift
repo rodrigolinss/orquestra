@@ -386,14 +386,14 @@ final class Orchestra: ObservableObject {
     @Published var harnesses: [Harness] = []
     @Published var limites: [Limite] = []
 
-    private var lastStatus: [String: AgentStatus] = [:]
+    fileprivate var lastStatus: [String: AgentStatus] = [:]
     // avisos visuais na tela; o notifyMac do macOS continua, mas nao adianta
     // quando o app esta na frente e a notificacao passa batida no canto
     @Published var eventos: [Evento] = []
     // o quadro pulsa quando o maestro reescreve algo que voce ainda nao leu
     @Published var quadroNaoLido = false
     private var quadroVisto = ""
-    private var nomesConhecidos: Set<String> = []
+    fileprivate var nomesConhecidos: Set<String> = []
     private var primeiroCiclo = true
 
     func avisar(_ titulo: String, _ detalhe: String, icone: String, cor: Color) {
@@ -946,6 +946,28 @@ final class Orchestra: ObservableObject {
             DispatchQueue.main.async {
                 if r.code == 0 { self.pin(path) }
                 done(r.code == 0 ? nil : r.err)
+                self.refresh()
+            }
+        }
+    }
+
+    // Recomeco: maestro novo, quadro em branco, painel vazio. As notas viram
+    // historico em _arquivo, e o git nao e tocado — nada aqui e irreversivel.
+    func limpar(descartarAgentes: Bool, done: @escaping (String?) -> Void) {
+        DispatchQueue.global().async {
+            let r = self.nvo(descartarAgentes ? ["limpar", "--descartar-agentes"] : ["limpar"])
+            DispatchQueue.main.async {
+                if r.code == 0 {
+                    self.quadro = ""
+                    self.quadroLido()
+                    self.eventos.removeAll()
+                    self.lastStatus.removeAll()
+                    self.nomesConhecidos = []
+                    self.avisar("painel limpo",
+                                "maestro novo, quadro em branco — as notas antigas ficaram arquivadas",
+                                icone: "sparkles", cor: Theme.accent)
+                }
+                done(r.code == 0 ? nil : (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines))
                 self.refresh()
             }
         }
@@ -2828,10 +2850,106 @@ struct TransparencyChecker: View {
 // MARK: - Sheets
 
 struct SheetTarget: Identifiable {
-    enum Kind { case notes, diff, kill, done, stop }
+    enum Kind { case notes, diff, kill, done, stop, limpar }
     let id = UUID()
     let name: String
     let kind: Kind
+}
+
+// Recomecar do zero sem medo: a tela diz, em portugues, exatamente o que
+// some da vista e o que continua existindo no disco.
+struct LimparSheet: View {
+    let orch: Orchestra
+    @Environment(\.dismiss) var dismiss
+    @State private var descartar = false
+    @State private var error: String?
+    @State private var limpando = false
+
+    private var vivos: [String] { orch.agents.map { $0.name } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles").foregroundColor(Theme.accent)
+                Text("Começar do zero")
+                    .font(.system(size: Theme.uiSize(13), weight: .bold))
+                    .foregroundColor(Theme.text)
+            }
+            Text("Maestro novo, quadro em branco, painel vazio — como se você tivesse acabado de abrir este projeto.")
+                .font(.system(size: Theme.uiSize(11))).foregroundColor(Theme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                linha("checkmark.circle.fill", AgentStatus.concluido.color,
+                      "Seu código não é tocado. Nada de desfazer o que você já aprovou.")
+                linha("archivebox.fill", Theme.accent,
+                      "As notas e o quadro atuais são arquivados com a data — dá pra ler depois.")
+                linha("arrow.counterclockwise", Theme.dim,
+                      "O maestro esquece a conversa: ele começa sem saber o que foi feito antes.")
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.04)).cornerRadius(6)
+
+            if !vivos.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("\(vivos.count) agente\(vivos.count == 1 ? "" : "s") com trabalho ainda não aplicado:")
+                        .font(.system(size: Theme.uiSize(11), weight: .semibold))
+                        .foregroundColor(AgentStatus.bloqueado.color)
+                    Text(vivos.joined(separator: ", "))
+                        .font(.system(size: Theme.uiSize(10), design: .monospaced))
+                        .foregroundColor(Theme.dim)
+                    Toggle(isOn: $descartar) {
+                        Text("descartar esse trabalho e limpar assim mesmo")
+                            .font(.system(size: Theme.uiSize(11))).foregroundColor(Theme.text)
+                    }
+                    .toggleStyle(.checkbox)
+                    Text(descartar
+                         ? "As cópias isoladas somem do painel. O que eles commitaram continua no git, recuperável."
+                         : "Sem marcar isto, o limpar é recusado — aprove ou descarte os agentes antes.")
+                        .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(AgentStatus.bloqueado.color.opacity(0.08)).cornerRadius(6)
+            }
+
+            if let e = error {
+                Text(e).font(.system(size: Theme.uiSize(10), design: .monospaced))
+                    .foregroundColor(AgentStatus.bloqueado.color)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                SmallButton(label: "cancelar") { dismiss() }
+                SmallButton(label: limpando ? "limpando…" : "começar do zero",
+                            icon: "sparkles", tint: Theme.accent) {
+                    guard !limpando else { return }
+                    limpando = true
+                    orch.limpar(descartarAgentes: descartar) { err in
+                        limpando = false
+                        if let err = err { error = err } else { dismiss() }
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 480)
+        .background(Theme.bg)
+    }
+
+    private func linha(_ icone: String, _ cor: Color, _ texto: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icone)
+                .font(.system(size: Theme.uiSize(10))).foregroundColor(cor)
+                .padding(.top, 1)
+            Text(texto)
+                .font(.system(size: Theme.uiSize(11))).foregroundColor(Theme.text.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 }
 
 // Aprovar sem sair do app: o diff na tela e um botao. Nenhum merge acontece
@@ -3597,6 +3715,10 @@ struct ContentView: View {
                     }
                 }
                 if tab == .painel, orch.project != nil {
+                    SmallButton(label: "começar do zero", icon: "sparkles",
+                                help: "maestro novo e quadro em branco — seu código não é tocado e as notas viram histórico") {
+                        sheet = SheetTarget(name: "", kind: .limpar)
+                    }
                     SmallButton(label: "encerrar sessão", icon: "stop.circle",
                                 help: "desliga maestro e agentes para você trocar de contexto — o trabalho fica salvo") {
                         sheet = SheetTarget(name: "", kind: .stop)
@@ -3868,6 +3990,8 @@ struct ContentView: View {
                 DoneSheet(name: s.name, orch: orch)
             case .stop:
                 StopSheet(orch: orch)
+            case .limpar:
+                LimparSheet(orch: orch)
             }
         }
         .sheet(isPresented: $showNew) { NewAgentSheet(orch: orch) }

@@ -296,6 +296,26 @@ func resumoTarefa(_ prompt: String, limite: Int = 160) -> String {
 
 // Ultima linha de conteudo das notas, ignorando cabecalhos e marcadores —
 // serve como "o que ele esta fazendo agora" sem abrir o diario inteiro.
+// O que o agente escreveu de mais recente, em ate 6 linhas curtas. E o que
+// o card mostra no lugar do terminal: o agente ja explicou o trabalho dele
+// em portugues na nota, nao ha motivo para voce ler tela de terminal.
+func resumoDaNota(_ note: String, max: Int = 6) -> [String] {
+    var linhas: [String] = []
+    for raw in note.split(separator: "\n").reversed() {
+        var l = raw.trimmingCharacters(in: .whitespaces)
+        guard !l.isEmpty, !l.hasPrefix("#"), !l.hasPrefix("---"), !l.hasPrefix("```") else { continue }
+        // marcadores de controle nao sao conteudo
+        if l.uppercased().hasPrefix("STATUS:") || l.hasPrefix("↳") { continue }
+        while l.hasPrefix("-") || l.hasPrefix("*") || l.hasPrefix(">") {
+            l = String(l.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+        guard l.count > 3 else { continue }
+        linhas.append(l.count > 180 ? String(l.prefix(180)) + "…" : l)
+        if linhas.count >= max { break }
+    }
+    return linhas.reversed()
+}
+
 func ultimoProgresso(_ note: String) -> String {
     for raw in note.split(separator: "\n").reversed() {
         var l = raw.trimmingCharacters(in: .whitespaces)
@@ -307,6 +327,18 @@ func ultimoProgresso(_ note: String) -> String {
         return l.count > 150 ? String(l.prefix(150)) + "…" : l
     }
     return ""
+}
+
+// Um acontecimento que merece a sua atencao: agente terminou, agente travou,
+// trabalho aplicado no projeto. Vira um aviso flutuante no topo do painel e
+// so sai de la quando voce dispensa ou depois de um tempo.
+struct Evento: Identifiable, Equatable {
+    let id = UUID()
+    let titulo: String
+    let detalhe: String
+    let icone: String
+    let cor: Color
+    let nascido: Date
 }
 
 final class Orchestra: ObservableObject {
@@ -355,6 +387,30 @@ final class Orchestra: ObservableObject {
     @Published var limites: [Limite] = []
 
     private var lastStatus: [String: AgentStatus] = [:]
+    // avisos visuais na tela; o notifyMac do macOS continua, mas nao adianta
+    // quando o app esta na frente e a notificacao passa batida no canto
+    @Published var eventos: [Evento] = []
+    // o quadro pulsa quando o maestro reescreve algo que voce ainda nao leu
+    @Published var quadroNaoLido = false
+    private var quadroVisto = ""
+    private var nomesConhecidos: Set<String> = []
+    private var primeiroCiclo = true
+
+    func avisar(_ titulo: String, _ detalhe: String, icone: String, cor: Color) {
+        eventos.append(Evento(titulo: titulo, detalhe: detalhe,
+                              icone: icone, cor: cor, nascido: Date()))
+        if eventos.count > 4 { eventos.removeFirst(eventos.count - 4) }
+    }
+
+    func dispensar(_ id: UUID) {
+        eventos.removeAll { $0.id == id }
+    }
+
+    func quadroLido() {
+        quadroVisto = quadro
+        quadroNaoLido = false
+    }
+
     @Published var quadro: String = ""
     @Published var limite: LimiteInfo?
     private var avisouEsgotado = false
@@ -688,14 +744,40 @@ final class Orchestra: ObservableObject {
             } ?? ""
 
             DispatchQueue.main.async {
+                let nomes = Set(list.map { $0.name })
                 for a in list {
                     if let prev = self.lastStatus[a.name], prev != a.status, a.status != .trabalhando {
                         notifyMac("orquestra: \(a.name)",
-                                  a.status == .concluido ? "terminou a tarefa — revise com diff/done"
+                                  a.status == .concluido ? "terminou a tarefa — revise e aprove"
                                                          : "está bloqueado e precisa de você")
+                        if a.status == .concluido {
+                            self.avisar("\(a.name) terminou",
+                                        "esperando você revisar e aprovar",
+                                        icone: "checkmark.seal.fill", cor: AgentStatus.concluido.color)
+                        } else if a.status == .bloqueado {
+                            self.avisar("\(a.name) travou",
+                                        "abra o card e diga o que fazer",
+                                        icone: "exclamationmark.triangle.fill", cor: AgentStatus.bloqueado.color)
+                        }
                     }
                     self.lastStatus[a.name] = a.status
                 }
+                // agente que some sumiu por um motivo: foi aplicado no projeto
+                // (aprovado) ou descartado. Some da tela, mas nunca em silencio.
+                if !self.primeiroCiclo {
+                    for ido in self.nomesConhecidos.subtracting(nomes).sorted() {
+                        let aprovado = self.lastStatus[ido] == .concluido
+                        self.avisar(aprovado ? "\(ido) foi aplicado no projeto"
+                                             : "\(ido) saiu do painel",
+                                    aprovado ? "o trabalho dele agora faz parte do seu código"
+                                             : "encerrado sem aplicar; a cópia dele foi descartada",
+                                    icone: aprovado ? "arrow.down.circle.fill" : "xmark.circle.fill",
+                                    cor: aprovado ? Theme.accent : Theme.dim)
+                        self.lastStatus[ido] = nil
+                    }
+                }
+                self.nomesConhecidos = nomes
+                self.primeiroCiclo = false
                 self.repo = repo
                 self.project = proj
                 // agente novo ganha uma vaga livre antes de ser desenhado,
@@ -704,7 +786,13 @@ final class Orchestra: ObservableObject {
                 self.agents = list
                 self.maestroPane = maestro
                 self.maestroRunning = running
-                self.quadro = quadro
+                if quadro != self.quadro {
+                    self.quadro = quadro
+                    let comConteudo = !quadro.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if comConteudo && quadro != self.quadroVisto {
+                        self.quadroNaoLido = true
+                    }
+                }
                 // limite do plano: o aviso vem no terminal de quem esbarrou nele
                 var lim = Orchestra.detectarLimite([maestro] + list.map { $0.pane })
                 if lim?.reset == nil, let r = self.usage?.blockReset {
@@ -1636,6 +1724,7 @@ struct AvisoLimite: View {
 struct BoardNode: View {
     @ObservedObject var orch: Orchestra
     @ObservedObject private var layout = AgentLayout.shared
+    @State private var pulso = false
     @State private var dragging = false
     @State private var resizing = false
     @State private var lastDrag: CGSize = .zero
@@ -1677,6 +1766,14 @@ struct BoardNode: View {
                     .foregroundColor(Theme.accent)
                 Text("· o maestro escreve aqui pra você")
                     .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                if orch.quadroNaoLido {
+                    Text("novidade")
+                        .font(.system(size: Theme.uiSize(9), weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Theme.accent).cornerRadius(4)
+                        .transition(.scale.combined(with: .opacity))
+                }
                 Spacer()
             }
             .help("resumo em linguagem simples do que a equipe fez, o que mudou e o que espera sua decisão — atualizado pelo maestro")
@@ -1696,7 +1793,16 @@ struct BoardNode: View {
         .background(Theme.card)
         .cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12)
-            .stroke(active ? Theme.accent.opacity(0.55) : Theme.accent.opacity(0.25), lineWidth: 1))
+            .stroke(orch.quadroNaoLido ? Theme.accent : (active ? Theme.accent.opacity(0.55) : Theme.accent.opacity(0.25)),
+                    lineWidth: orch.quadroNaoLido ? 2 : 1))
+        // enquanto voce nao leu, o quadro respira — e o unico elemento da tela
+        // que se mexe sozinho, entao o olho vai nele
+        .shadow(color: Theme.accent.opacity(orch.quadroNaoLido ? (pulso ? 0.55 : 0.12) : 0),
+                radius: pulso ? 22 : 8)
+        .animation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: pulso)
+        .onAppear { pulso = true }
+        // ler e clicar: o brilho para assim que voce encosta no quadro
+        .onTapGesture { if orch.quadroNaoLido { withAnimation { orch.quadroLido() } } }
         .overlay(alignment: .bottomTrailing) {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
                 .font(.system(size: Theme.uiSize(8), weight: .bold))
@@ -1960,6 +2066,10 @@ struct AgentNode: View {
     let onKill: () -> Void
     let onDone: () -> Void
     @State private var draft = ""
+    // O terminal deixou de ser o padrao. O card mostra o que o agente
+    // escreveu em portugues; a tela crua fica a um clique, para quando voce
+    // realmente quiser ver a maquina trabalhando.
+    @State private var verTerminal = false
     @ObservedObject private var layout = AgentLayout.shared
     @State private var dragging = false
     @State private var resizing = false
@@ -2084,10 +2194,47 @@ struct AgentNode: View {
                 AvisoLimite(limite: lim, compacto: true)
                     .transition(.opacity)
             }
-            // o terminal absorve o espaco extra: aumentar o card mostra mais tela
-            TerminalText(content: agent.pane)
+            // corpo do card: resumo em portugues por padrao, terminal sob demanda
+            let anotacoes = resumoDaNota(agent.note)
+            HStack(spacing: 6) {
+                Image(systemName: verTerminal ? "text.alignleft" : "terminal")
+                    .font(.system(size: Theme.uiSize(9)))
+                Text(verTerminal ? "o agente contou assim" : "ver a tela dele")
+                    .font(.system(size: Theme.uiSize(9)))
+                Spacer()
+            }
+            .foregroundColor(Theme.dim)
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { verTerminal.toggle() } }
+            .help(verTerminal
+                  ? "voltar para o resumo que o agente escreveu"
+                  : "mostrar a tela do terminal, crua, como ela esta agora")
+
+            if verTerminal || anotacoes.isEmpty {
+                TerminalText(content: agent.pane)
+                    .frame(minHeight: 70, maxHeight: .infinity)
+                TerminalKeys(window: agent.name, pane: agent.pane, orch: orch)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(anotacoes.enumerated()), id: \.offset) { _, linha in
+                            HStack(alignment: .top, spacing: 6) {
+                                Circle().fill(agent.status.color.opacity(0.7))
+                                    .frame(width: 4, height: 4).padding(.top, 6)
+                                Text(linha)
+                                    .font(.system(size: Theme.uiSize(11)))
+                                    .foregroundColor(Theme.text.opacity(0.9))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 .frame(minHeight: 70, maxHeight: .infinity)
-            TerminalKeys(window: agent.name, pane: agent.pane, orch: orch)
+                .background(Color.white.opacity(0.035))
+                .cornerRadius(6)
+            }
             PromptField(placeholder: "mandar instrução para \(agent.name)…",
                         text: $draft, historyKey: "agent") { t in
                 orch.sendAgent(agent.name, t)
@@ -3212,6 +3359,56 @@ struct WindowAccessor: NSViewRepresentable {
     }
 }
 
+// Avisos flutuantes no topo do painel. Existem porque o card sumindo da tela
+// nao explica nada: agente aprovado, agente travado e agente que terminou
+// precisam DIZER que aconteceram, na frente de quem esta olhando.
+struct AvisosOverlay: View {
+    @ObservedObject var orch: Orchestra
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ForEach(orch.eventos) { e in
+                HStack(spacing: 10) {
+                    Image(systemName: e.icone)
+                        .font(.system(size: Theme.uiSize(14)))
+                        .foregroundColor(e.cor)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(e.titulo)
+                            .font(.system(size: Theme.uiSize(12), weight: .semibold))
+                            .foregroundColor(Theme.text)
+                        Text(e.detalhe)
+                            .font(.system(size: Theme.uiSize(10)))
+                            .foregroundColor(Theme.dim)
+                    }
+                    Spacer(minLength: 12)
+                    Image(systemName: "xmark")
+                        .font(.system(size: Theme.uiSize(9)))
+                        .foregroundColor(Theme.dim)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 11)
+                .frame(width: 380, alignment: .leading)
+                .background(Theme.card)
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(e.cor.opacity(0.5), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation { orch.dispensar(e.id) } }
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .onAppear {
+                    // some sozinho, mas devagar: tempo de voce ler mesmo que
+                    // esteja olhando para outro canto da tela
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                        withAnimation { orch.dispensar(e.id) }
+                    }
+                }
+            }
+        }
+        .padding(.top, 14)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: orch.eventos)
+        .allowsHitTesting(!orch.eventos.isEmpty)
+    }
+}
+
 // MARK: - Tela principal
 
 struct ContentView: View {
@@ -3350,6 +3547,33 @@ struct ContentView: View {
                         .keyboardShortcut("=", modifiers: .command)
                         .help("aproximar o canvas (⌘=)")
                     }
+                }
+                // o estado da equipe em uma frase, sempre visivel: com varios
+                // cards espalhados pelo canvas, ninguem conta na mao
+                if !orch.agents.isEmpty {
+                    let prontos = orch.agents.filter { $0.status == .concluido }.count
+                    let travados = orch.agents.filter { $0.status == .bloqueado }.count
+                    let tocando = orch.agents.filter { $0.status == .trabalhando }.count
+                    HStack(spacing: 6) {
+                        if tocando > 0 {
+                            Circle().fill(AgentStatus.trabalhando.color).frame(width: 6, height: 6)
+                            Text("\(tocando) trabalhando")
+                        }
+                        if prontos > 0 {
+                            Circle().fill(AgentStatus.concluido.color).frame(width: 6, height: 6)
+                            Text(prontos == 1 ? "1 esperando você aprovar"
+                                              : "\(prontos) esperando você aprovar")
+                        }
+                        if travados > 0 {
+                            Circle().fill(AgentStatus.bloqueado.color).frame(width: 6, height: 6)
+                            Text("\(travados) travado\(travados == 1 ? "" : "s")")
+                        }
+                    }
+                    .font(.system(size: Theme.uiSize(10), weight: .medium))
+                    .foregroundColor(Theme.text.opacity(0.9))
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(Color.white.opacity(0.06)).cornerRadius(6)
+                    .help("quantos agentes estão em cada estado agora")
                 }
                 if tab == .painel {
                     SmallButton(label: "centralizar", icon: "scope",
@@ -3648,6 +3872,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showNew) { NewAgentSheet(orch: orch) }
         .sheet(isPresented: $showInit) { InitSheet(orch: orch) }
+        .overlay(alignment: .top) { AvisosOverlay(orch: orch) }
         // o titulo diz de qual projeto e esta janela — com varias abertas,
         // e o unico jeito de saber onde voce esta antes de clicar
         .background(WindowAccessor { w in

@@ -42,6 +42,11 @@ nvo attach                   tmux attach -t orquestra
 nvo stop [--keep-project]    encerra a sessao (maestro e agentes) preservando
                              worktrees, branches e notas
 
+## Plataformas
+macOS e Windows, so. No Windows tudo e programa do Windows instalado pelo
+winget — Git, MSYS2 (que da bash.exe e tmux.exe) e o Claude Code nativo.
+Nada de subsistema, maquina virtual, distribuicao, usuario ou senha.
+
 ## Regras de seguranca, obrigatorias
 1. Nenhum agente roda na branch principal. Sempre worktree + branch agent/<nome>.
 2. Nunca usar --dangerously-skip-permissions em nenhum ponto.

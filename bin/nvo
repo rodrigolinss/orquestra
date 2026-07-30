@@ -9,7 +9,7 @@ set -euo pipefail
 ORQ="$HOME/orquestra"
 # shellcheck source=platform.sh
 [ -f "$ORQ/bin/platform.sh" ] && . "$ORQ/bin/platform.sh" || {
-  ORQ_OS="desconhecido"; ORQ_PKG="none"; ORQ_HAS_APP=0
+  ORQ_OS="desconhecido"; ORQ_PKG="none"; ORQ_HAS_APP=0; ORQ_PTY=""
   ORQ_SHELL_RC="$HOME/.profile"
   orq_pkg_hint() { echo "instale '$1' pelo gerenciador de pacotes do seu sistema"; }
 }
@@ -65,8 +65,11 @@ MB_POR_AGENTE="${NVO_MB_POR_AGENTE:-250}"   # medido com folga (o maior visto: ~
 MB_RESERVA="${NVO_MB_RESERVA:-700}"         # folga que o sistema precisa para nao matar
 
 mem_livre_mb() {
-  if [ -r /proc/meminfo ]; then
-    awk '/^MemAvailable:/ {print int($2/1024); exit}' /proc/meminfo
+  if [ "$ORQ_OS" = "windows" ]; then
+    # o proprio Windows responde, em KB
+    powershell.exe -NoProfile -Command \
+      "(Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory" 2>/dev/null \
+      | tr -d '\r' | awk 'NF {print int($1/1024); exit}'
     return
   fi
   # macOS: paginas livres + inativas + especulativas sao reaproveitaveis
@@ -768,7 +771,7 @@ EOF
     launch="$(harness_launch "$cli" "$model")"
     [ -n "$launch" ] || die "nao consegui montar o comando do harness '$cli'"
   fi
-  tmux send-keys -t "$SESSION:$name" "$launch \"\$(cat '$meta.prompt')\"" Enter
+  tmux send-keys -t "$SESSION:$name" "${ORQ_PTY:+$ORQ_PTY }$launch \"\$(cat '$meta.prompt')\"" Enter
 
   echo "agente '$name' criado ($cli${model:+ · $model})"
   if [ -n "$parent" ]; then
@@ -924,9 +927,9 @@ cmd_religar() {
       # --continue retoma a ultima conversa daquele diretorio: o agente volta
       # sabendo o que ja tinha feito, em vez de recomecar do zero
       tmux send-keys -t "$SESSION:$name" \
-        "$launch --continue \"O terminal caiu e voltou. Releia suas notas em $(note_path "$name") e continue de onde parou. Se ja tinha terminado, so confirme o STATUS.\"" Enter
+        "${ORQ_PTY:+$ORQ_PTY }$launch --continue \"O terminal caiu e voltou. Releia suas notas em $(note_path "$name") e continue de onde parou. Se ja tinha terminado, so confirme o STATUS.\"" Enter
     elif [ -f "$meta.prompt" ]; then
-      tmux send-keys -t "$SESSION:$name" "$launch \"\$(cat '$meta.prompt')\"" Enter
+      tmux send-keys -t "$SESSION:$name" "${ORQ_PTY:+$ORQ_PTY }$launch \"\$(cat '$meta.prompt')\"" Enter
     else
       tmux send-keys -t "$SESSION:$name" "$launch" Enter
     fi
@@ -960,7 +963,7 @@ cmd_clear() {
 # um token: usa "bash" como harness de mentira no lugar do Claude. Roda num
 # repositorio temporario, num socket tmux proprio, e limpa tudo no fim — nao
 # encosta na sua sessao nem no seu projeto. E o jeito de saber se o Windows
-# (ou qualquer Linux) esta de fato inteiro, em vez de descobrir no meio de um
+# esta de fato inteiro, em vez de descobrir no meio de um
 # trabalho de verdade.
 cmd_autoteste() {
   # globais de proposito: o trap de saida roda depois que a funcao termina, e
@@ -1207,7 +1210,7 @@ INTEGRACAO (merge) — regra de autorizacao:
 Agora responda apenas "pronto" e aguarde as instrucoes do humano.
 EOF
   tmux send-keys -t "$SESSION:maestro" \
-    "cd '$REPO' && $mlaunch \"\$(cat '$brief')\"" Enter
+    "cd '$REPO' && ${ORQ_PTY:+$ORQ_PTY }$mlaunch \"\$(cat '$brief')\"" Enter
   echo "maestro iniciado em $REPO ($mcli${mmodel:+ · $mmodel})"
   echo "  acompanhe no app, ou entre com: nvo attach"
 }
@@ -1713,30 +1716,13 @@ cmd_doctor() {
   echo
 
   case "$ORQ_OS" in
-    macos) chk OK "plataforma: macOS $(sw_vers -productVersion 2>/dev/null)" ;;
-    wsl)   chk OK "plataforma: Windows via WSL2 (${WSL_DISTRO_NAME:-linux})" ;;
-    linux) chk OK "plataforma: Linux" ;;
-    *)     chk AVISO "plataforma nao reconhecida ($(uname -s))" "o orquestra e testado em macOS, Linux e WSL2" ;;
+    macos)   chk OK "plataforma: macOS $(sw_vers -productVersion 2>/dev/null)" ;;
+    windows) chk OK "plataforma: Windows ($(uname -s | cut -d- -f1))"
+             [ -n "$ORQ_PTY" ] \
+               && chk OK "winpty presente (o agente recebe teclado e desenha a tela)" \
+               || chk AVISO "winpty ausente" "$(orq_pkg_hint winpty) — sem ele o agente sobe mudo" ;;
+    *)       chk AVISO "plataforma nao suportada ($(uname -s))" "o orquestra roda em macOS e Windows" ;;
   esac
-
-  # No WSL o PATH do Windows aparece dentro do Linux, entao um claude.exe ou um
-  # git.exe instalado no Windows e encontrado primeiro — e ele nao entende
-  # caminhos /home/... nem os worktrees que criamos aqui. Falha estranha e
-  # dificil de diagnosticar sozinho, entao apontamos o dedo direto.
-  if [ "$ORQ_OS" = "wsl" ]; then
-    local prog caminho
-    for prog in claude codex git tmux node; do
-      caminho="$(command -v "$prog" 2>/dev/null || true)"
-      case "$caminho" in
-        /mnt/[a-z]/*|*.exe)
-          chk AVISO "'$prog' esta vindo do Windows ($caminho)" \
-            "instale a versao do Linux dentro do WSL: ele nao entende caminhos /home/... e falha de formas estranhas" ;;
-      esac
-    done
-    command -v npm >/dev/null 2>&1 \
-      || chk AVISO "npm nao encontrado no WSL" \
-           "o Ubuntu do WSL vem sem Node: sudo apt-get install -y nodejs npm (ou use o nvm) — sem ele nao da para instalar o Claude Code aqui dentro"
-  fi
 
   command -v tmux >/dev/null 2>&1 \
     && chk OK "tmux $(tmux -V | awk '{print $2}')" \
@@ -1762,10 +1748,6 @@ cmd_doctor() {
   if command -v claude >/dev/null 2>&1; then
     local claude_path; claude_path="$(command -v claude)"
     case "$claude_path" in
-      /mnt/[a-z]/*|*.exe)
-        # WSL enxerga o PATH do Windows: um claude.exe nao entende caminhos /home
-        chk FALTA "o 'claude' encontrado e o do Windows ($claude_path)" \
-          "instale o Claude Code DENTRO do WSL: npm install -g @anthropic-ai/claude-code" ;;
       *)
         chk OK "Claude Code instalado ($claude_path)"
         if [ -f "$HOME/.claude.json" ] || [ -d "$HOME/.claude" ]; then

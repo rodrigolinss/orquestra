@@ -22,23 +22,21 @@ if [ "$HERE" != "$ORQ" ]; then
 fi
 cd "$ORQ"
 
-# 2. plataforma (macOS / Linux / Windows via WSL2)
+# 2. plataforma (macOS ou Windows)
 # shellcheck source=bin/platform.sh
 . "$ORQ/bin/platform.sh"
 case "$ORQ_OS" in
-  macos) echo "-> plataforma: macOS (CLI + app nativo)" ;;
-  wsl)   echo "-> plataforma: Windows via WSL2 (${WSL_DISTRO_NAME:-linux}) — CLI" ;;
-  linux) echo "-> plataforma: Linux — CLI" ;;
-  *)     echo "aviso: plataforma nao reconhecida ($(uname -s)); seguindo como Linux" ;;
+  macos)   echo "-> plataforma: macOS (CLI + app nativo)" ;;
+  windows) echo "-> plataforma: Windows (CLI)" ;;
+  *)       echo "aviso: plataforma nao suportada ($(uname -s)). O orquestra roda em macOS e Windows." ;;
 esac
 
-# 2b. --tudo: instala tambem o que nao e nosso (Node e Claude Code) quando falta.
-# Existe para o caminho do Windows caber em um comando: quem esta no WSL nao
-# deveria precisar decorar tres instaladores diferentes para comecar.
+# 2b. --tudo: instala tambem o Claude Code quando falta. Existe para o caminho
+# do Windows caber em um comando so, sem decorar dois instaladores.
 INSTALAR_TUDO=0
 [ "${1:-}" = "--tudo" ] && INSTALAR_TUDO=1
 
-# 3. dependencias (so instala o que falta, e so pede sudo se for instalar)
+# 3. dependencias (so instala o que falta)
 FALTANDO=""
 for pkg in tmux jq; do
   command -v "$pkg" >/dev/null 2>&1 || FALTANDO="$FALTANDO $pkg"
@@ -50,24 +48,9 @@ if [ -z "$FALTANDO" ]; then
 elif [ "$ORQ_PKG" = "none" ]; then
   echo "aviso: nenhum gerenciador de pacotes conhecido — instale tmux e jq manualmente"
 else
-  # Pedir a senha do nada assusta, e no WSL confunde de verdade: a senha e a do
-  # Linux que voce criou quando o Ubuntu abriu pela primeira vez, nao a do
-  # Windows nem a da sua conta Microsoft. Dizemos isso ANTES de o prompt subir.
-  # Rodando como root (o caso do instalador de Windows) nao ha senha para pedir
-  # nem sudo para depender: chamamos o gerenciador direto.
-  SUDO="sudo"
-  [ "$(id -u)" = "0" ] && SUDO=""
+  # Dizemos o que sera instalado antes de instalar: instalador que mexe na
+  # maquina sem avisar assusta com razao.
   echo "-> falta instalar:$FALTANDO"
-  case "$ORQ_PKG" in
-    apt|dnf|pacman)
-      if [ -n "$SUDO" ]; then
-        echo "   isso usa 'sudo', entao o sistema vai pedir a sua senha."
-        [ "$ORQ_OS" = "wsl" ] \
-          && echo "   no WSL e a senha do Linux, nao a do Windows."
-      fi
-      [ "$ORQ_PKG" = "apt" ] && $SUDO apt-get update -qq || true
-      ;;
-  esac
   for pkg in $FALTANDO; do
     echo "-> instalando $pkg ($ORQ_PKG)"
     orq_pkg_install "$pkg" || echo "   aviso: falhou; rode manualmente: $(orq_pkg_hint "$pkg")"
@@ -75,28 +58,17 @@ else
 fi
 
 # 3b. Node e Claude Code, so com --tudo e so onde faz sentido
-if [ "$INSTALAR_TUDO" = 1 ] && [ "$ORQ_OS" != "macos" ]; then
-  if ! command -v node >/dev/null 2>&1; then
-    echo "-> instalando Node.js (o Claude Code precisa dele; o Ubuntu nao traz)"
-    if [ "$ORQ_PKG" = "apt" ]; then
-      curl -fsSL https://deb.nodesource.com/setup_22.x | ${SUDO:+sudo -E} bash - >/dev/null 2>&1 \
-        && ${SUDO} apt-get install -y nodejs >/dev/null 2>&1 \
-        && echo "   ok: node $(node --version 2>/dev/null)" \
-        || echo "   aviso: falhou — instale manualmente: https://nodejs.org"
-    else
-      orq_pkg_install nodejs || echo "   aviso: instale o Node manualmente: https://nodejs.org"
-    fi
-  else
-    echo "-> node $(node --version) ja instalado"
-  fi
-
-  if ! command -v claude >/dev/null 2>&1; then
-    echo "-> instalando o Claude Code"
-    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
+if [ "$INSTALAR_TUDO" = 1 ] && ! command -v claude >/dev/null 2>&1; then
+  echo "-> instalando o Claude Code"
+  if [ "$ORQ_OS" = "windows" ]; then
+    # o instalador oficial do Windows e um .ps1; chamamos o powershell nativo
+    powershell.exe -NoProfile -Command "irm https://claude.ai/install.ps1 | iex" >/dev/null 2>&1 \
       && echo "   ok: claude instalado (rode 'claude' uma vez para fazer login)" \
       || echo "   aviso: falhou — veja https://code.claude.com/docs/en/setup"
   else
-    echo "-> claude ja instalado"
+    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
+      && echo "   ok: claude instalado (rode 'claude' uma vez para fazer login)" \
+      || echo "   aviso: falhou — veja https://code.claude.com/docs/en/setup"
   fi
 fi
 

@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/plataforma-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows%20(WSL2)-black" alt="Plataformas">
+  <img src="https://img.shields.io/badge/plataforma-macOS%20%C2%B7%20Windows-black" alt="Plataformas">
   <img src="https://img.shields.io/badge/agentes-Claude%20Code%20%C2%B7%20Codex-CCFF00" alt="Agentes">
   <img src="https://img.shields.io/badge/licen%C3%A7a-MIT-blue" alt="MIT">
   <img src="https://img.shields.io/badge/feito%20com-SwiftUI%20%2B%20Bash-orange" alt="Stack">
@@ -54,7 +54,7 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 
 ## Recursos
 
-- **App nativo para macOS** — canvas visual com o maestro no topo e os cards dos agentes conectados abaixo dele. Status, saída do terminal, notas e diffs num relance. *No Linux e no Windows/WSL2 a interface é a CLI, que faz tudo o que o app faz.*
+- **App nativo para macOS** — canvas visual com o maestro no topo e os cards dos agentes conectados abaixo dele. Status, saída do terminal, notas e diffs num relance. *No Windows a interface é a CLI, que faz tudo o que o app faz.*
 - **Funciona com Claude Code e Codex** — escolha o harness por agente. Times mistos (builder no Claude + reviewer no Codex) funcionam de imediato.
 - **Instalação sem credenciais** — o instalador detecta o que você já tem. Claude/Codex já logados? Git já configurado? O Orquestra simplesmente aproveita.
 - **Pronto para GitHub** — abra uma pasta local ou cole `usuario/repo` e o Orquestra clona e registra. Repositórios privados funcionam com suas credenciais git existentes.
@@ -66,15 +66,14 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 
 ## Instalação
 
-**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos). As CLIs de agente precisam de **Node.js** — no macOS ele costuma já estar lá; no Ubuntu do WSL2 não vem, e o `./install.sh --tudo` instala junto.
+**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos). 
 
-| Plataforma | Interface | Observação |
+| Plataforma | Interface | Como instalar |
 |---|---|---|
 | **macOS** | App nativo + CLI | Requer [Homebrew](https://brew.sh); o app compila se as Xcode Command Line Tools estiverem presentes |
-| **Linux** | CLI | Detecta `apt`, `dnf` ou `pacman` |
-| **Windows** | CLI, via **WSL2** | [Um comando no PowerShell](#windows-um-comando), logo abaixo — faz tudo sozinho. Não use os comandos de baixo |
+| **Windows** | CLI | [Um comando no PowerShell](#windows-um-comando), abaixo — instala tudo sozinho |
 
-No macOS e no Linux:
+No macOS:
 
 ```bash
 git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
@@ -83,67 +82,41 @@ cd ~/orquestra && ./install.sh
 
 ### Windows — um comando
 
-Abra o **PowerShell como administrador** (menu Iniciar → digite `PowerShell` → botão direito → *Executar como administrador*) e cole:
+No **PowerShell**, cole:
 
 ```powershell
 irm https://raw.githubusercontent.com/rodrigolinss/orquestra/main/instalar-no-windows.ps1 | iex
 ```
 
-Pronto. Ele faz tudo sozinho: liga o WSL, instala o Ubuntu **sem criar usuário nem senha**, instala `git`, `tmux`, `jq`, Node.js, o Claude Code e o Orquestra, cria um atalho **Orquestra** no seu Desktop e roda o autoteste para provar que ficou funcionando.
-
-Se o WSL ainda não estava ligado na sua máquina, ele avisa para reiniciar e você cola o mesmo comando de novo — da segunda vez termina sozinho.
-
-Depois, abra o atalho **Orquestra** no Desktop e:
+Ele instala tudo sozinho, cria um atalho **Orquestra** no seu Desktop e roda o autoteste no final para provar que ficou funcionando. Depois é só abrir o atalho:
 
 ```bash
-claude                       # uma vez, para fazer login (abre o navegador do Windows)
+claude                       # uma vez, para fazer login
 nvo init ~/meu-projeto       # a pasta do seu código
 nvo maestro                  # o chefe: fale com ele em português
 ```
 
-#### Nada de usuário e senha do Linux
+**Não há usuário, senha, distribuição, subsistema nem máquina virtual.** O que é instalado são três programas de Windows, em `Arquivos de Programas`, pelo `winget` — o instalador do próprio Windows:
 
-O assistente do WSL normalmente pede para você criar um nome de usuário e uma senha de Linux. O instalador pula isso: ele usa `wsl --install --no-launch`, que instala a distribuição sem abrir o assistente de primeiro uso, e deixa o **root** como usuário padrão. Root no WSL não tem senha nem pede `sudo` — você nunca vê um prompt de login.
+| Programa | Para quê |
+|---|---|
+| [Git para Windows](https://git-scm.com/downloads/win) | versionamento — é como cada agente trabalha na própria cópia isolada |
+| [MSYS2](https://www.msys2.org) | entrega o `bash.exe` e o `tmux.exe`, que são o motor do orquestra |
+| [Claude Code](https://code.claude.com/docs/en/setup) | o agente, na versão nativa de Windows |
 
-#### Por que ainda tem um Linux embaixo?
-
-Pergunta justa, e a resposta não é "porque o Claude Code exige" — ele **roda nativo no Windows**, direto no PowerShell.
-
-Quem precisa é o Orquestra. Ele é feito de duas peças que não existem no Windows nativo:
-
-- **bash** — as ~1.700 linhas do `nvo` são script de shell Unix;
-- **tmux** — é ele que mantém cada agente vivo numa janela própria, deixa ler a tela sem interromper o agente e continuar rodando depois que você fecha o terminal. O Windows não tem equivalente disso que dê para automatizar.
-
-O WSL2 não é "outro sistema para cuidar": é um recurso do próprio Windows, ligado por um comando, e some da sua vista depois. Seus arquivos, seu VS Code e seu navegador continuam sendo os do Windows.
-
-Uma versão 100% nativa significaria reescrever o motor em PowerShell e trocar o tmux por uma camada de ConPTY — é um projeto, não um ajuste. Se isso for importante para você, [abra uma issue](https://github.com/rodrigolinss/orquestra/issues).
+O `tmux.exe` é o que mantém cada agente vivo na própria janela, deixa você ler a tela sem interromper o que ele está fazendo, e continua rodando depois que você fecha o terminal.
 
 #### O que muda no Windows
 
 **Você tem:** a CLI completa — criar agentes, acompanhar, aprovar com merge, tudo.
-**Você não tem:** o app visual (é SwiftUI, exclusivo da Apple) e as notificações do sistema. O acompanhamento é pelo `nvo ls` e pelo `nvo attach`.
-
-#### Onde deixar os seus projetos
-
-**Dentro do Linux (`~/projetos/...`), não em `/mnt/c/...`.** O Orquestra cria uma cópia de trabalho isolada por agente, e no disco do Windows visto pelo WSL isso fica lento a ponto de atrapalhar, além de embaralhar permissões.
-
-Se o seu código está no Windows, clone de novo do lado do Linux:
-
-```bash
-mkdir -p ~/projetos && cd ~/projetos
-git clone <url-do-seu-repo>
-nvo init ~/projetos/<seu-repo>
-```
-
-Para editar isso no VS Code do Windows, instale a extensão **WSL** e rode `code .` de dentro do Ubuntu: abre a janela do Windows editando os arquivos do Linux, sem perda de desempenho.
+**Você não tem:** o app visual, que é SwiftUI e só existe no macOS. O acompanhamento é pelo `nvo ls` e pelo `nvo attach`.
 
 #### Se algo der errado
 
 ```bash
 nvo doctor        # aponta o que falta e como resolver
+nvo autoteste     # roda o fluxo inteiro e diz onde quebrou, sem gastar token
 ```
-
-Ele detecta a pegadinha mais comum: o WSL enxerga o `PATH` do Windows, então um `claude.exe` ou `git.exe` instalado no lado Windows aparece no terminal do Ubuntu e é encontrado primeiro — mas não entende caminhos `/home/...` e quebra de formas difíceis de diagnosticar. O doctor diz qual programa está vindo do lado errado.
 
 #### O dia a dia sem o app
 
@@ -152,11 +125,11 @@ nvo maestro                          # o chefe: fale com ele em português
 nvo ls                               # status de todos os agentes, colorido
 nvo attach                           # entra na visão ao vivo (tmux)
 nvo diff <nome>                      # o que o agente mudou
-nvo done <nome>                      # aprova: pede o nome digitado e faz o merge
+nvo done <nome>                      # aprova: mostra o diff e faz o merge
 nvo religar --todos                  # terminal caiu? recria e retoma o contexto
 ```
 
-Duas teclas do tmux: **`Ctrl-b` depois `d`** sai da visão ao vivo sem matar nada, e **`Ctrl-b` depois `n`** vai para a próxima janela. Fechar o terminal também não mata os agentes — eles seguem rodando.
+Duas teclas do tmux: **`Ctrl-b` depois `d`** sai da visão ao vivo sem matar nada, e **`Ctrl-b` depois `n`** vai para a próxima janela. Fechar a janela também não mata os agentes — eles seguem rodando.
 
 O instalador é idempotente e só preenche as lacunas: instala `tmux`/`jq` se faltarem, conecta o hook de segurança, adiciona a CLI ao seu `PATH` e compila o app nativo quando as Xcode Command Line Tools estão presentes. Ao final, faz um diagnóstico completo do ambiente:
 
@@ -175,7 +148,7 @@ pronto para orquestrar.
 
 ### O app (macOS)
 
-No Linux e no Windows/WSL2, pule para [A CLI](#a-cli) — ela cobre todo o fluxo.
+No Windows, pule para [A CLI](#a-cli) — ela cobre todo o fluxo.
 
 Abra o **Orquestra** (Spotlight → "Orquestra"). Escolha um projeto — uma pasta local ou um repositório do GitHub — depois inicie o maestro e diga o que você quer:
 
@@ -185,7 +158,7 @@ Cada agente aparece como um card ao vivo conectado ao maestro: status, saída do
 
 ### A CLI
 
-No macOS a aprovação padrão é o clique no app. A CLI cobre isso e todo o resto, de forma scriptável — e é a interface completa no Linux e no Windows/WSL2:
+No macOS a aprovação padrão é o clique no app. A CLI cobre isso e todo o resto, de forma scriptável — e é a interface completa no Windows:
 
 ```bash
 nvo init ~/projetos/minha-api         # registra o projeto ativo
@@ -261,7 +234,7 @@ O hook do firewall é distribuído automaticamente para todo worktree (como `.cl
 ~/orquestra/
 ├── bin/nvo                  CLI — a única fonte de ação (bash, multiplataforma)
 ├── bin/guard.sh             firewall determinístico de comandos (hook PreToolUse)
-├── bin/platform.sh          detecção de macOS / Linux / WSL2
+├── bin/platform.sh          detecção de macOS / Windows
 ├── bin/nvo-usage.py         medidor de tokens (lê os transcritos do Claude Code)
 ├── app/main.swift           app nativo de macOS (SwiftUI, arquivo único)
 ├── app/build.sh             recompilação em um comando

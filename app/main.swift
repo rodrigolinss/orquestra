@@ -145,7 +145,7 @@ struct PanePrompt {
         // e um marcador do proprio prompt de selecao do Claude Code por perto,
         // pra nao confundir um plano numerado (do maestro ou nas notas) com
         // uma pergunta de permissao de verdade
-        let temMarcador = ["do you want", "❯", "esc to cancel", "(y/n)"]
+        let temMarcador = ["do you want", "esc to cancel", "(y/n)", "requires approval"]
             .contains { tail.lowercased().contains($0) }
         self.options = (sequencial && temMarcador) ? Array(found.prefix(4)) : []
     }
@@ -492,8 +492,13 @@ final class Orchestra: ObservableObject {
     // resposta" (assinatura nova), nunca a cada ciclo. No modo liberdade,
     // responde "1" — a opcao afirmativa padrao do Claude Code — com trava de
     // 8s por assinatura para nao mandar "1" duas vezes enquanto a tela atualiza.
-    // autoResponder = false no maestro: ele e uma conversa com o humano, nunca
-    // deve levar tecla digitada sozinha — so o aviso sonoro pode continuar.
+    // O maestro tambem e respondido no modo liberdade: ele pede permissao de
+    // ferramenta como qualquer agente, e deixar a equipe inteira parada
+    // esperando um clique seu derruba o sentido do modo. O que causava os
+    // digitos soltos no chat nao era responder o maestro — era o detector
+    // frouxo, que confundia lista numerada com menu de permissao. Com o
+    // detector exigindo numeracao em sequencia MAIS um marcador do proprio
+    // menu do Claude Code, responder aqui voltou a ser seguro.
     private func processarPrompt(janela: String, pane: String, autoResponder: Bool) {
         let p = PanePrompt(pane: pane)
         guard p.isAsking else {
@@ -808,7 +813,7 @@ final class Orchestra: ObservableObject {
                     self.avisouEsgotado = false
                 }
                 // aviso sonoro / modo liberdade: maestro e todos os agentes
-                self.processarPrompt(janela: "maestro", pane: maestro, autoResponder: false)
+                self.processarPrompt(janela: "maestro", pane: maestro, autoResponder: true)
                 for a in list { self.processarPrompt(janela: a.name, pane: a.pane, autoResponder: true) }
                 // ciclo fechado: quando a EQUIPE INTEIRA conclui, o maestro e
                 // avisado uma unica vez por equipe. O aviso e chaveado por
@@ -2692,7 +2697,7 @@ struct AjustesView: View {
                                     Text("modo liberdade — concordar com tudo")
                                         .font(.system(size: Theme.uiSize(11), weight: .semibold))
                                         .foregroundColor(Theme.text)
-                                    Text("quando um agente pedir permissão no meio do trabalho, o orquestra responde “sim” sozinho, para todos. Isto NÃO aprova o trabalho pronto: aplicar no projeto continua sendo você, no botão “aprovar” do card. O firewall (guard.sh) continua bloqueando comandos destrutivos.")
+                                    Text("quando o maestro ou um agente pedir permissão no meio do trabalho, o orquestra responde “sim” sozinho. Isto NÃO aprova o trabalho pronto: aplicar no projeto continua sendo você, no botão “aprovar” do card. O firewall (guard.sh) continua bloqueando comandos destrutivos.")
                                         .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -3597,7 +3602,7 @@ struct ContentView: View {
                         .background(Theme.accent).cornerRadius(4)
                     }
                     .buttonStyle(.plain)
-                    .help("modo liberdade ativo: os agentes recebem “sim” automático. O maestro não é respondido sozinho — é a pessoa quem decide o que ele pergunta. Clique para ajustar.")
+                    .help("modo liberdade ativo: maestro e agentes recebem “sim” automático nos pedidos de permissão. Clique para ajustar.")
                 }
                 // zoom da interface — tipografia pequena era reclamacao legitima
                 HStack(spacing: 2) {

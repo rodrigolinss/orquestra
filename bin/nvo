@@ -749,16 +749,34 @@ Cada um recebe o proprio worktree e a propria branch, isolado do seu.
   nvo note <nome>         le as notas de um subagente seu
   nvo send <nome> "..."   corrige o rumo de um subagente seu
 
-Quando delegar vale a pena:
-- as partes sao independentes e cabem em arquivos ou modulos diferentes;
-- a tarefa tem duas naturezas distintas (ex.: implementar e revisar).
-Quando NAO vale:
-- a tarefa e pequena, ou voce ja entendeu como fazer: delegar custa mais token
-  do que fazer, porque o subagente precisa reaprender todo o contexto;
-- as partes mexem no mesmo arquivo: vira conflito de merge garantido.
+PRIMEIRO, ESCOLHA A FERRAMENTA CERTA — sao duas, e servem para coisas
+diferentes:
+- Para LER, procurar, mapear ou investigar sem escrever nada: use o subagente
+  interno do seu proprio harness (no Claude Code, a ferramenta Task/Explore).
+  E instantaneo e barato. NAO use "nvo new" para isso — criar worktree, branch
+  e janela para uma leitura e desperdicio.
+- Para ESCREVER codigo numa frente separada da sua: use "nvo new --parent".
+  E o unico caminho que da ao subagente uma copia isolada, para o trabalho
+  dele nao colidir com o seu no meio do caminho.
 
-Limites: no maximo $NVO_MAX_FANOUT subagentes seus e $NVO_MAX_AGENTS agentes vivos no projeto
-inteiro. Voce NAO aprova nem descarta o trabalho de ninguem — isso e do humano.
+DELEGUE (nvo new --parent) quando QUALQUER uma destas for verdade — nao espere
+ter certeza absoluta, delegar cedo custa menos que descobrir tarde:
+- voce identificou 2 ou mais frentes que mexem em arquivos DIFERENTES e cada
+  uma daria mais de meia hora de trabalho;
+- a tarefa pede duas naturezas distintas (implementar e revisar, backend e
+  interface, migrar e testar);
+- voce esta ha bastante tempo na mesma tarefa e ela nao encolheu: e sinal de
+  que era maior do que parecia quando foi escrita.
+
+NAO delegue quando:
+- e leitura ou investigacao (use o subagente interno do harness, acima);
+- as partes mexem no mesmo arquivo: vira conflito de merge garantido;
+- a tarefa e pequena o bastante para caber em poucos passos seus.
+
+Limites agora: voce pode ter ate $NVO_MAX_FANOUT subagentes, e o projeto suporta
+$NVO_MAX_AGENTS agentes vivos ao todo — contando voce, ha $(( vivos + 1 )) ocupando vaga
+neste instante, entao sobram $(( NVO_MAX_AGENTS - vivos - 1 )). Se estiver perto do
+teto, rode "nvo ls" antes de decidir. Voce NAO aprova nem descarta o trabalho de ninguem — isso e do humano.
 Quando um subagente seu concluir, integre o resultado ao seu relatorio e diga
 nas suas notas que o trabalho dele esta pronto para revisao.
 EOF
@@ -1272,8 +1290,12 @@ O dinheiro e real e a memoria acaba antes do dinheiro. Portanto:
    descobre nada. Espere o humano falar ou um agente concluir.
 2. NAO rode 'nvo ls', 'git log' ou 'nvo note' em laco. Uma leitura por
    mudanca real, nao uma por minuto de espera.
-3. Crie o MENOR numero de agentes que resolve. Dois agentes bons valem mais
-   que seis se atropelando — e seis nesta maquina derrubam a sessao.
+3. Crie o MENOR numero de agentes que resolve NO PRIMEIRO NIVEL. Dois agentes
+   bons valem mais que seis se atropelando. Isso nao e medo de equipe grande:
+   o agente que voce cria pode criar subagentes por conta propria quando
+   descobrir, trabalhando, que a tarefa dele tinha frentes independentes — e
+   ele descobre isso melhor que voce, que ainda nao leu o codigo. Voce abre a
+   frente; quem esta dentro dela decide se precisa de mais gente.
 4. Prefira sonnet nos agentes. So peca opus quando a tarefa for de arquitetura
    ou analise profunda, e diga por que ao criar.
 5. Antes de criar um agente novo, pergunte-se se um dos vivos nao resolve

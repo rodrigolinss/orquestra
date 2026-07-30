@@ -3452,6 +3452,7 @@ struct DoneSheet: View {
                 Spacer()
                 SmallButton(label: "fechar", icon: "xmark") { dismiss() }
             }
+            .layoutPriority(1)
             Text("Revise as mudanças abaixo. Aplicar faz merge --no-ff de agent/\(name) e remove o worktree; as notas ficam guardadas.")
                 .font(.system(size: Theme.uiSize(10))).foregroundColor(Theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
@@ -3475,7 +3476,12 @@ struct DoneSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
+            // O diff fica preso numa area que rola. Sem isto um diff grande
+            // empurra os botoes para fora da tela e a janela deixa de ter
+            // saida — foi o que aconteceu ao aprovar um agente com 174 linhas.
             TerminalText(content: diff, size: 10.5, colorDiff: true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(-1)
 
             if let e = error {
                 Text(e).font(.system(size: Theme.uiSize(10), design: .monospaced))
@@ -3492,9 +3498,13 @@ struct DoneSheet: View {
                             help: "faz o merge de agent/\(name) no projeto",
                             action: aplicar)
             }
+            .layoutPriority(1)
         }
         .padding(18)
-        .frame(width: 720, height: 560)
+        // Esc sempre fecha: se o layout escapar de novo, ainda ha saida.
+        .background(Button("") { dismiss() }.keyboardShortcut(.cancelAction).opacity(0))
+        .frame(minWidth: 620, idealWidth: 760, maxWidth: 1000,
+               minHeight: 420, idealHeight: 620, maxHeight: 820)
         .background(Theme.bg)
         .onAppear { orch.diff(name) { diff = $0 } }
     }
@@ -3576,9 +3586,13 @@ struct TextSheet: View {
                 SmallButton(label: "fechar", icon: "xmark") { dismiss() }
             }
             TerminalText(content: content, size: 11)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(-1)
         }
         .padding(16)
-        .frame(width: 680, height: 480)
+        .background(Button("") { dismiss() }.keyboardShortcut(.cancelAction).opacity(0))
+        .frame(minWidth: 560, idealWidth: 720, maxWidth: 1000,
+               minHeight: 380, idealHeight: 560, maxHeight: 800)
         .background(Theme.bg)
     }
 }

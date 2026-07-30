@@ -418,6 +418,9 @@ final class Orchestra: ObservableObject {
     @Published var quadroNaoLido = false
     private var quadroVisto = ""
     fileprivate var nomesConhecidos: Set<String> = []
+    // quando cada agente apareceu: agente de vida curta nasce e morre dentro
+    // de um teste automatico, e anunciar a saida dele so assusta a toa
+    private var nascimentos: [String: Date] = [:]
     private var primeiroCiclo = true
 
     func avisar(_ titulo: String, _ detalhe: String, icone: String, cor: Color) {
@@ -799,16 +802,44 @@ final class Orchestra: ObservableObject {
                 }
                 // agente que some sumiu por um motivo: foi aplicado no projeto
                 // (aprovado) ou descartado. Some da tela, mas nunca em silencio.
+                let agora = Date()
+                for n in nomes where self.nascimentos[n] == nil { self.nascimentos[n] = agora }
                 if !self.primeiroCiclo {
+                    var aplicados: [String] = [], descartados: [String] = []
                     for ido in self.nomesConhecidos.subtracting(nomes).sorted() {
-                        let aprovado = self.lastStatus[ido] == .concluido
-                        self.avisar(aprovado ? "\(ido) foi aplicado no projeto"
-                                             : "\(ido) saiu do painel",
-                                    aprovado ? "o trabalho dele agora faz parte do seu código"
-                                             : "encerrado sem aplicar; a cópia dele foi descartada",
-                                    icone: aprovado ? "arrow.down.circle.fill" : "xmark.circle.fill",
-                                    cor: aprovado ? Theme.accent : Theme.dim)
+                        let vida = self.nascimentos[ido].map { agora.timeIntervalSince($0) } ?? 0
+                        self.lastStatus[ido] == .concluido ? aplicados.append(ido)
+                                                           : descartados.append(ido)
+                        // Agente que viveu menos de um minuto e andaime: um
+                        // teste automatico criou e removeu sem voce ver nada
+                        // aparecer. Anunciar a saida dele e susto sem conteudo.
+                        if vida < 60 {
+                            aplicados.removeAll { $0 == ido }
+                            descartados.removeAll { $0 == ido }
+                        }
                         self.lastStatus[ido] = nil
+                        self.nascimentos[ido] = nil
+                    }
+                    // varios de uma vez viram UM aviso: tres cartoes iguais
+                    // empilhados leem como catastrofe, e catastrofe nao e
+                    if aplicados.count == 1 {
+                        self.avisar("\(aplicados[0]) foi aplicado no projeto",
+                                    "o trabalho dele agora faz parte do seu código",
+                                    icone: "arrow.down.circle.fill", cor: Theme.accent)
+                    } else if aplicados.count > 1 {
+                        self.avisar("\(aplicados.count) trabalhos aplicados no projeto",
+                                    aplicados.joined(separator: ", "),
+                                    icone: "arrow.down.circle.fill", cor: Theme.accent)
+                    }
+                    if descartados.count == 1 {
+                        self.avisar("\(descartados[0]) foi descartado",
+                                    "saiu sem aplicar; o que ele commitou continua no git",
+                                    icone: "xmark.circle.fill", cor: Theme.dim)
+                    } else if descartados.count > 1 {
+                        self.avisar("\(descartados.count) agentes descartados",
+                                    descartados.joined(separator: ", ")
+                                        + " — saíram sem aplicar; o que commitaram continua no git",
+                                    icone: "xmark.circle.fill", cor: Theme.dim)
                     }
                 }
                 self.nomesConhecidos = nomes

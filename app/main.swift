@@ -510,6 +510,9 @@ final class Orchestra: ObservableObject {
     // quando cada agente apareceu: agente de vida curta nasce e morre dentro
     // de um teste automatico, e anunciar a saida dele so assusta a toa
     private var nascimentos: [String: Date] = [:]
+    // planos ja liberados automaticamente, para nao reenviar a aprovacao a
+    // cada ciclo enquanto a nota nao muda
+    private var planosLiberados: Set<String> = []
     // A branch de um agente nunca muda, e a contagem de arquivos mexidos muda
     // devagar. Rodar dois comandos git por agente a cada ciclo era o grosso do
     // peso do painel numa maquina pequena: com 12 agentes davam 24 processos
@@ -758,8 +761,12 @@ final class Orchestra: ObservableObject {
     static func statusFromNote(_ note: String) -> AgentStatus {
         let tail = String(note.suffix(4000)).uppercased()
         var best: (Int, AgentStatus) = (-1, .trabalhando)
+        // "STATUS: TRABALHANDO" e o que o nvo escreve na nota ao aprovar um
+        // plano. Sem ele nesta lista, o card continuava marcado como "plano
+        // aguardando" mesmo depois de aprovado — o clique parecia nao valer.
         for (needle, st) in [("STATUS: CONCLU", AgentStatus.concluido),
                              ("STATUS: AGUARDANDO", .aguardando),
+                             ("STATUS: TRABALHANDO", .trabalhando),
                              ("BLOQUEADO", .bloqueado),
                              ("BLOQUEIO:", .bloqueado)] {
             if let r = tail.range(of: needle, options: .backwards) {
@@ -1021,6 +1028,16 @@ final class Orchestra: ObservableObject {
                 // Liberdade quer dizer "concorda por mim": se voce ligou o modo,
                 // nao faz sentido continuar clicando aprovar um por um. O que
                 // conflita continua parando para voce decidir.
+                // Plano parado esperando aprovacao tambem e "concordar com
+                // tudo": no modo liberdade a equipe nao fica travada esperando
+                // um clique seu para comecar a executar o que ja planejou.
+                if self.autoYes {
+                    for a in list where a.status == .aguardando {
+                        if self.planosLiberados.insert(a.name).inserted {
+                            self.approvePlan(a.name)
+                        }
+                    }
+                }
                 if allDone && running && self.autoYes && !self.aprovandoTodos {
                     let prontos = list.filter { $0.status == .concluido }
                     if !prontos.isEmpty { self.aprovarTodos() }
@@ -1087,6 +1104,8 @@ final class Orchestra: ObservableObject {
             let r = self.nvo(["approve", name])
             DispatchQueue.main.async {
                 if r.code == 0 {
+                    self.planosLiberados.insert(name)
+                    self.eventos.removeAll { $0.titulo == "plano de \(name) aprovado" }
                     self.avisar("plano de \(name) aprovado",
                                 "ele voltou a trabalhar — o card muda para “trabalhando”",
                                 icone: "play.circle.fill", cor: AgentStatus.trabalhando.color)

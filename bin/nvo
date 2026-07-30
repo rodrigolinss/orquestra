@@ -17,6 +17,35 @@ NOTES_ROOT="$ORQ/notes"
 META_ROOT="$ORQ/agents"
 CONF="$ORQ/project.conf"
 SESSION="orquestra"
+
+# O nvo pode ser chamado pelo app (launchd), que herda um PATH minimo sem
+# homebrew e sem ~/.local/bin. Como o tmux congela o PATH de quando o servidor
+# subiu, um agente lancado nesse estado nao acha o "claude" e falha calado.
+# Garantimos os diretorios usuais aqui, sem duplicar o que ja esta no PATH.
+for d in "$ORQ/bin" "$HOME/.local/bin" "$HOME/bin" /opt/homebrew/bin /usr/local/bin; do
+  case ":$PATH:" in *":$d:"*) ;; *) [ -d "$d" ] && PATH="$d:$PATH" ;; esac
+done
+export PATH
+
+# --- Limites da hierarquia -------------------------------------------------
+# Um agente pode delegar criando subagentes, mas arvore de agente cresce em
+# custo e cai em supervisao muito rapido. Os numeros abaixo sao o ponto onde
+# delegacao ainda ajuda mais do que atrapalha:
+#
+#   NVO_MAX_DEPTH=2   maestro(0) -> agente(1) -> subagente(2). No nivel 3 o
+#                     trabalho ja chega distorcido: cada camada reescreve a
+#                     tarefa com as proprias palavras, e ninguem no topo
+#                     consegue mais dizer o que foi realmente pedido.
+#   NVO_MAX_FANOUT=4  filhos por agente. Acima disso o pai gasta mais token
+#                     coordenando do que o trabalho economiza.
+#   NVO_MAX_AGENTS=8  agentes vivos ao mesmo tempo, somando todas as camadas.
+#                     E o teto pratico de uma janela de 5h do plano Max.
+#
+# Todos ajustaveis por variavel de ambiente para quem quiser outro equilibrio.
+NVO_MAX_DEPTH="${NVO_MAX_DEPTH:-2}"
+NVO_MAX_FANOUT="${NVO_MAX_FANOUT:-4}"
+NVO_MAX_AGENTS="${NVO_MAX_AGENTS:-8}"
+
 # NVO_AGENT_CMD existe para testes (ex.: "bash"); em uso real e sempre claude,
 # SEM --dangerously-skip-permissions (regra 2 do SPEC).
 AGENT_CMD="${NVO_AGENT_CMD:-claude}"
@@ -41,6 +70,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
   nvo kill <nome>              encerra janela e remove worktree SEM merge
   nvo attach                   entra na sessao tmux "orquestra"
+  nvo stop [--forget-project]  encerra a sessao (maestro e agentes) preservando
+                               worktrees, branches, notas e o projeto ativo
   nvo doctor                   diagnostica o ambiente (deps, login, hook)
   nvo usage [--json]           consumo de tokens: sessao 5h, dia, modelos
 EOF
@@ -74,6 +105,10 @@ assert_wt_inside() {
 ensure_session() {
   tmux has-session -t "$SESSION" 2>/dev/null \
     || tmux new-session -d -s "$SESSION" -n maestro -c "$ORQ"
+  # um servidor tmux que subiu com PATH pobre (ex.: criado pelo app) continuaria
+  # sem enxergar o claude nas janelas novas — reescrevemos o PATH do ambiente
+  # global a cada chamada, que e barato e mantem as janelas futuras sadias.
+  tmux set-environment -g PATH "$PATH" 2>/dev/null || true
 }
 
 # instala o hook de seguranca num diretorio de trabalho, sem sujar o git do
@@ -103,17 +138,19 @@ cmd_init() {
 
 cmd_new() {
   # --plan em qualquer posicao: agente planeja e espera aprovacao antes de codar
-  local plan=0 args=()
-  local a
-  for a in "$@"; do
-    case "$a" in
-      --plan) plan=1 ;;
-      *) args+=("$a") ;;
+  # --parent <nome>: o agente nasce como subagente de outro, criando camadas
+  local plan=0 parent="" args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --plan) plan=1; shift ;;
+      --parent) [ $# -ge 2 ] || die "uso: --parent <nome>"; parent="$2"; shift 2 ;;
+      --parent=*) parent="${1#--parent=}"; shift ;;
+      *) args+=("$1"); shift ;;
     esac
   done
   set -- ${args[@]+"${args[@]}"}
 
-  [ $# -ge 2 ] || die 'uso: nvo new [--plan] <nome> "<tarefa>" [claude|codex] [modelo]'
+  [ $# -ge 2 ] || die 'uso: nvo new [--plan] [--parent <nome>] <nome> "<tarefa>" [claude|codex] [modelo]'
   local name="$1" task="$2" cli="${3:-$AGENT_CMD}" model="${4:-}"
   case "$cli" in
     claude|codex|bash) ;;
@@ -124,6 +161,27 @@ cmd_new() {
   command -v "$cli" >/dev/null 2>&1 || die "'$cli' nao esta instalado (veja nvo doctor)"
   check_name "$name"
   load_project
+
+  # --- hierarquia: valida profundidade, fanout e total antes de gastar nada ---
+  local depth=1 filhos=0 vivos=0
+  if [ -n "$parent" ]; then
+    check_name "$parent"
+    agent_exists "$parent" || die "agente pai '$parent' nao existe"
+    local pmeta pdepth
+    pmeta="$(meta_path "$parent").meta"
+    pdepth="$(sed -n 's/^depth=//p' "$pmeta" 2>/dev/null)"
+    [ -n "$pdepth" ] || pdepth=1
+    depth=$((pdepth + 1))
+    [ "$depth" -le "$NVO_MAX_DEPTH" ] || die \
+      "profundidade $depth excede o limite de $NVO_MAX_DEPTH: '$parent' ja esta na ultima camada que pode delegar. Peca a ele para fazer a tarefa, ou crie o agente direto no maestro."
+    filhos="$(grep -l "^parent=$parent$" "$META_ROOT/$PROJ"/*.meta 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$filhos" -lt "$NVO_MAX_FANOUT" ] || die \
+      "'$parent' ja tem $filhos subagentes (limite $NVO_MAX_FANOUT). Espere um terminar, ou junte as tarefas."
+  fi
+  vivos="$(ls -1 "$META_ROOT/$PROJ"/*.meta 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$vivos" -lt "$NVO_MAX_AGENTS" ] || die \
+    "ja existem $vivos agentes ativos (limite $NVO_MAX_AGENTS). Aprove ou descarte alguem antes de criar outro."
+
   local wt base branch note meta
   wt="$(wt_path "$name")"
   assert_wt_inside "$wt"
@@ -140,7 +198,8 @@ cmd_new() {
   git -C "$REPO" worktree add -b "$branch" "$wt" "$base" >/dev/null
 
   meta="$(meta_path "$name")"
-  printf 'base=%s\ncli=%s\nmodel=%s\n' "$base" "$cli" "$model" > "$meta.meta"
+  printf 'base=%s\ncli=%s\nmodel=%s\nparent=%s\ndepth=%s\n' \
+    "$base" "$cli" "$model" "$parent" "$depth" > "$meta.meta"
 
   note="$(note_path "$name")"
   [ -f "$note" ] || printf '# %s — %s\n\n' "$PROJ" "$name" > "$note"
@@ -180,9 +239,42 @@ Contexto e regras obrigatorias:
 - Ao fim de cada etapa, registre progresso e decisoes em $note (secoes com
   data/hora). O orquestrador le essas notas em vez de ler sua tela.
 - Ao terminar a tarefa, escreva "STATUS: CONCLUIDO" na ultima secao das notas.
-
-Comece agora.
 EOF
+    # Delegacao: so quem ainda tem camada abaixo recebe a ferramenta. Quem esta
+    # no ultimo nivel precisa saber disso, senao tenta, falha e desperdica turno.
+    if [ "$depth" -lt "$NVO_MAX_DEPTH" ]; then
+      cat <<EOF
+
+DELEGACAO (voce e o agente "$name", camada $depth de $NVO_MAX_DEPTH):
+Se a tarefa for grande demais para uma cabeca so, voce pode criar subagentes:
+  nvo new --parent $name <nome> "<tarefa>" claude sonnet
+Cada um recebe o proprio worktree e a propria branch, isolado do seu.
+  nvo ls                  ve o estado de todos
+  nvo note <nome>         le as notas de um subagente seu
+  nvo send <nome> "..."   corrige o rumo de um subagente seu
+
+Quando delegar vale a pena:
+- as partes sao independentes e cabem em arquivos ou modulos diferentes;
+- a tarefa tem duas naturezas distintas (ex.: implementar e revisar).
+Quando NAO vale:
+- a tarefa e pequena, ou voce ja entendeu como fazer: delegar custa mais token
+  do que fazer, porque o subagente precisa reaprender todo o contexto;
+- as partes mexem no mesmo arquivo: vira conflito de merge garantido.
+
+Limites: no maximo $NVO_MAX_FANOUT subagentes seus e $NVO_MAX_AGENTS agentes vivos no projeto
+inteiro. Voce NAO aprova nem descarta o trabalho de ninguem — isso e do humano.
+Quando um subagente seu concluir, integre o resultado ao seu relatorio e diga
+nas suas notas que o trabalho dele esta pronto para revisao.
+EOF
+    else
+      cat <<EOF
+
+VOCE E O ULTIMO NIVEL (camada $depth de $NVO_MAX_DEPTH): nao crie subagentes, o
+"nvo new" vai recusar. Execute a tarefa voce mesmo. Se ela for grande demais,
+escreva "BLOQUEADO:" nas notas explicando como dividiria, e pare.
+EOF
+    fi
+    printf '\nComece agora.\n'
   } > "$meta.prompt"
 
   ensure_session
@@ -197,6 +289,9 @@ EOF
   tmux send-keys -t "$SESSION:$name" "$launch \"\$(cat '$meta.prompt')\"" Enter
 
   echo "agente '$name' criado ($cli${model:+ · $model})"
+  if [ -n "$parent" ]; then
+    echo "  subagente de '$parent' (camada $depth de $NVO_MAX_DEPTH)"
+  fi
   echo "  branch:   $branch (base: $base)"
   echo "  worktree: $wt"
   echo "  notas:    $note"
@@ -236,8 +331,14 @@ SEU PAPEL: voce NAO escreve nem edita o codigo do projeto. Voce delega para
 agentes e acompanha o trabalho deles. Quem constroi sao eles, cada um numa
 copia isolada do projeto (git worktree + branch propria).
 
+A EQUIPE TEM CAMADAS: voce e a camada 0. Os agentes que voce cria sao a camada
+1, e eles proprios podem criar subagentes (camada 2) quando a tarefa render
+divisao. O limite e $NVO_MAX_DEPTH camadas, $NVO_MAX_FANOUT filhos por agente e $NVO_MAX_AGENTS agentes vivos.
+Prefira delegar em profundidade so quando a tarefa tem partes independentes de
+verdade: cada camada custa contexto e afasta o trabalho de quem pediu.
+
 SUAS FERRAMENTAS (rode pelo Bash):
-  nvo new [--plan] <nome> "<tarefa>" [claude|codex] [modelo]
+  nvo new [--plan] [--parent <nome>] <nome> "<tarefa>" [claude|codex] [modelo]
         cria um agente. Use --plan quando a tarefa for grande ou ambigua: o
         agente escreve um plano e espera aprovacao antes de escrever codigo.
         Modelo: use "sonnet" para construcao (bem mais barato) e reserve o
@@ -374,9 +475,23 @@ cmd_diff() {
 }
 
 cmd_done() {
-  [ $# -eq 1 ] || die "uso: nvo done <nome>"
+  local name="" confirm="" have_confirm=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      # A confirmacao pode vir por argumento para que uma interface grafica
+      # colete o nome digitado. A regra 6 continua de pe: sem o nome exato
+      # nao ha merge — o que muda e onde o humano digita, nao se ele digita.
+      --confirm) [ $# -ge 2 ] || die "uso: nvo done <nome> --confirm <nome>"
+                 confirm="$2"; have_confirm=1; shift 2 ;;
+      --confirm=*) confirm="${1#--confirm=}"; have_confirm=1; shift ;;
+      -*) die "opcao desconhecida: $1" ;;
+      *)  [ -z "$name" ] || die "uso: nvo done <nome> [--confirm <nome>]"
+          name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "uso: nvo done <nome> [--confirm <nome>]"
   load_project
-  local name="$1" wt base branch confirm
+  local wt base branch
   agent_exists "$name" || die "agente '$name' nao existe"
   wt="$(wt_path "$name")"
   assert_wt_inside "$wt"
@@ -393,8 +508,10 @@ cmd_done() {
   echo
 
   # Regra 6: merge nunca e automatico. Confirmacao humana digitando o nome.
-  printf 'Digite o nome do agente (%s) para confirmar o merge, ou qualquer outra coisa para cancelar: ' "$name"
-  IFS= read -r confirm
+  if [ "$have_confirm" -eq 0 ]; then
+    printf 'Digite o nome do agente (%s) para confirmar o merge, ou qualquer outra coisa para cancelar: ' "$name"
+    IFS= read -r confirm
+  fi
   [ "$confirm" = "$name" ] || die "confirmacao nao confere; merge cancelado"
 
   [ "$(git -C "$REPO" symbolic-ref --short HEAD)" = "$base" ] \
@@ -408,6 +525,32 @@ cmd_done() {
   tmux kill-window -t "$SESSION:$name" 2>/dev/null || true
   rm -f "$(meta_path "$name").meta" "$(meta_path "$name").prompt"
   echo "merge de $branch concluido; worktree removido. Notas preservadas em $(note_path "$name")"
+}
+
+# Encerra a sessao inteira: derruba maestro e agentes, mas NAO toca em worktree,
+# branch nem notas. E um "fechar o expediente" — o trabalho continua no disco e
+# volta a aparecer quando os agentes forem religados.
+cmd_stop() {
+  # O projeto continua registrado por padrao: encerrar a sessao e algo que se
+  # faz varias vezes por dia, e perder o projeto ativo nisso obriga a reconfigurar
+  # do zero. Desregistrar e o caso raro, entao exige a flag.
+  local forget=0
+  case "${1:-}" in
+    --forget-project) forget=1 ;;
+    --keep-project|"") ;;
+    *) die "uso: nvo stop [--forget-project]" ;;
+  esac
+  if tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux kill-session -t "$SESSION"
+    echo "sessao '$SESSION' encerrada (maestro e agentes desligados)"
+  else
+    echo "nenhuma sessao ativa"
+  fi
+  if [ "$forget" -eq 1 ] && [ -f "$CONF" ]; then
+    rm -f "$CONF"
+    echo "projeto ativo desregistrado — use 'nvo init <caminho>' para comecar outro"
+  fi
+  echo "worktrees, branches e notas foram preservados"
 }
 
 cmd_kill() {
@@ -543,6 +686,7 @@ case "${1:-}" in
   kill)   shift; cmd_kill "$@" ;;
   attach)  shift; cmd_attach "$@" ;;
   maestro) shift; cmd_maestro "$@" ;;
+  stop)    shift; cmd_stop "$@" ;;
   approve) shift; cmd_approve "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;

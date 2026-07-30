@@ -20,8 +20,13 @@ nvo diff <nome>              git diff da branch do agente contra a base
 nvo done <nome>              mostra o diff, exige confirmacao digitando o
                              nome, so entao faz merge --no-ff e remove
                              o worktree
+        [--confirm <nome>]   recebe a confirmacao por argumento, para que uma
+                             interface grafica colete o nome digitado; o valor
+                             tem de bater com o nome do agente
 nvo kill <nome>              encerra a janela e remove o worktree SEM merge
 nvo attach                   tmux attach -t orquestra
+nvo stop [--keep-project]    encerra a sessao (maestro e agentes) preservando
+                             worktrees, branches e notas
 
 ## Regras de seguranca, obrigatorias
 1. Nenhum agente roda na branch principal. Sempre worktree + branch agent/<nome>.
@@ -34,7 +39,8 @@ nvo attach                   tmux attach -t orquestra
    e qualquer acesso a .env, .env.*, *.pem, id_rsa, ~/.ssh, ~/.aws
 5. O agente orquestrador nunca edita codigo. Ele so usa nvo new, read,
    send e note.
-6. nvo done nunca faz merge automatico.
+6. nvo done nunca faz merge automatico. A confirmacao digitada e obrigatoria
+   em qualquer interface: sem o nome exato do agente, o merge e recusado.
 7. Worktree fora de ~/orquestra/worktrees e recusado.
 
 ## Notas compartilhadas

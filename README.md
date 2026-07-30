@@ -150,6 +150,7 @@ nvo diff builder                      # revisa o trabalho contra a branch base
 nvo done builder                      # diff → confirmação digitada → merge --no-ff
 nvo kill reviewer                     # descarta sem merge (a branch é preservada)
 nvo attach                            # acompanha tudo ao vivo no tmux
+nvo stop                              # encerra a sessão, preservando o trabalho
 nvo doctor                            # diagnóstico do ambiente
 nvo usage                             # consumo de tokens: janela de 5h, dia, modelos
 ```
@@ -184,7 +185,7 @@ O Orquestra parte do princípio de que os agentes *vão* se comportar mal em alg
 |---|---|
 | **Isolamento por worktree** | Agentes nunca rodam na branch principal. Worktrees fora de `~/orquestra/worktrees` são rejeitados. |
 | **Firewall de comandos** (`guard.sh`) | Bloqueia antes da execução: `rm -rf` em caminhos absolutos/home, `sudo`, `git push`, `git reset --hard`, checkout/switch para main/master, pipes `curl\|sh`, `chmod 777`, e qualquer acesso a `.env*`, `*.pem`, `id_rsa`, `~/.ssh`, `~/.aws`. |
-| **Merge com trava humana** | O `nvo done` exige digitar o nome do agente num terminal de verdade. O app deliberadamente não tem botão de merge. |
+| **Merge com trava humana** | O `nvo done` exige digitar o nome exato do agente para aplicar — na CLI ou no diálogo do app, sempre com o diff à vista. Não existe merge de um clique. |
 | **Permissões padrão** | Os prompts de permissão dos agentes nunca são contornados. `--dangerously-skip-permissions` não é usado em lugar nenhum do código. |
 
 O hook do firewall é distribuído automaticamente para todo worktree (como `.claude/settings.local.json`, ignorado pelo git), então os agentes carregam suas barreiras junto.

@@ -32,6 +32,12 @@ case "$ORQ_OS" in
   *)     echo "aviso: plataforma nao reconhecida ($(uname -s)); seguindo como Linux" ;;
 esac
 
+# 2b. --tudo: instala tambem o que nao e nosso (Node e Claude Code) quando falta.
+# Existe para o caminho do Windows caber em um comando: quem esta no WSL nao
+# deveria precisar decorar tres instaladores diferentes para comecar.
+INSTALAR_TUDO=0
+[ "${1:-}" = "--tudo" ] && INSTALAR_TUDO=1
+
 # 3. dependencias (so instala o que falta, e so pede sudo se for instalar)
 FALTANDO=""
 for pkg in tmux jq; do
@@ -61,6 +67,32 @@ else
     echo "-> instalando $pkg ($ORQ_PKG)"
     orq_pkg_install "$pkg" || echo "   aviso: falhou; rode manualmente: $(orq_pkg_hint "$pkg")"
   done
+fi
+
+# 3b. Node e Claude Code, so com --tudo e so onde faz sentido
+if [ "$INSTALAR_TUDO" = 1 ] && [ "$ORQ_OS" != "macos" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "-> instalando Node.js (o Claude Code precisa dele; o Ubuntu nao traz)"
+    if [ "$ORQ_PKG" = "apt" ]; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null 2>&1 \
+        && sudo apt-get install -y nodejs >/dev/null 2>&1 \
+        && echo "   ok: node $(node --version 2>/dev/null)" \
+        || echo "   aviso: falhou — instale manualmente: https://nodejs.org"
+    else
+      orq_pkg_install nodejs || echo "   aviso: instale o Node manualmente: https://nodejs.org"
+    fi
+  else
+    echo "-> node $(node --version) ja instalado"
+  fi
+
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "-> instalando o Claude Code"
+    curl -fsSL https://claude.ai/install.sh | bash >/dev/null 2>&1 \
+      && echo "   ok: claude instalado (rode 'claude' uma vez para fazer login)" \
+      || echo "   aviso: falhou — veja https://code.claude.com/docs/en/setup"
+  else
+    echo "-> claude ja instalado"
+  fi
 fi
 
 # 3. permissoes e diretorios de runtime

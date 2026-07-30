@@ -66,13 +66,13 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 
 ## Instalação
 
-**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos). As CLIs de agente precisam de **Node.js** — no macOS ele costuma já estar lá; no Ubuntu do WSL2, não vem, e o [passo 3](#3-instalar-o-nodejs) resolve.
+**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos). As CLIs de agente precisam de **Node.js** — no macOS ele costuma já estar lá; no Ubuntu do WSL2 não vem, e o `./install.sh --tudo` instala junto.
 
 | Plataforma | Interface | Observação |
 |---|---|---|
 | **macOS** | App nativo + CLI | Requer [Homebrew](https://brew.sh); o app compila se as Xcode Command Line Tools estiverem presentes |
 | **Linux** | CLI | Detecta `apt`, `dnf` ou `pacman` |
-| **Windows** | CLI, via **WSL2** | Não roda no Windows nativo. O [passo a passo completo](#windows-passo-a-passo-completo) está logo abaixo — siga por ele, não pelos dois comandos acima |
+| **Windows** | CLI, via **WSL2** | Não roda no Windows nativo — [dois comandos](#windows-dois-comandos), logo abaixo. Não use os dois de cima |
 
 No macOS e no Linux:
 
@@ -81,88 +81,54 @@ git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
 cd ~/orquestra && ./install.sh
 ```
 
-### Windows — passo a passo completo
+### Windows — dois comandos
 
-O motor do Orquestra é bash + git + tmux, então ele roda **dentro do WSL2**, não no Windows nativo. Não existe PowerShell aqui: depois do passo 1, tudo acontece no terminal do Ubuntu.
-
-**O que você tem no Windows:** a CLI completa. **O que você não tem:** o app visual (ele é SwiftUI, exclusivo da Apple) e as notificações do sistema. O acompanhamento é pelo `nvo ls` e pelo `nvo attach`.
-
-#### 1. Instalar o WSL2
-
-No **PowerShell como administrador**:
+**1.** No **PowerShell como administrador**, e depois reinicie:
 
 ```powershell
 wsl --install
 ```
 
-Reinicie o computador. Ao voltar, o Ubuntu abre sozinho e pede para você **criar um usuário e uma senha do Linux** — são novos, não têm relação com a conta do Windows. Guarde a senha: ela é pedida em todo `sudo`.
+Ao voltar, o Ubuntu abre e pede para você **criar um usuário e uma senha do Linux** — são novos, não têm relação com a conta do Windows. Guarde a senha: é ela que o `sudo` pede.
 
-Daqui em diante, todos os comandos são no terminal do Ubuntu (procure por "Ubuntu" no menu Iniciar).
-
-#### 2. Instalar as dependências
-
-```bash
-sudo apt-get update
-sudo apt-get install -y git tmux jq curl
-```
-
-#### 3. Instalar o Node.js
-
-O Ubuntu do WSL **vem sem Node**, e sem ele o passo 4 falha com `npm: command not found`:
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-sudo apt-get install -y nodejs
-node --version    # confirme que respondeu algo como v22.x
-```
-
-#### 4. Instalar o Claude Code dentro do WSL
-
-```bash
-npm install -g @anthropic-ai/claude-code
-claude          # faça login uma vez; abre o navegador do Windows
-```
-
-> **A pegadinha que mais derruba gente:** o WSL enxerga o `PATH` do Windows. Se você já tem o Claude Code instalado no Windows, o `claude.exe` dele aparece no terminal do Ubuntu e é encontrado primeiro — mas ele não entende caminhos `/home/...` e quebra de formas difíceis de entender. Instale a versão do Linux, aqui dentro. O `nvo doctor` detecta esse caso e avisa qual programa está vindo do lado errado.
-
-#### 5. Instalar o Orquestra
+**2.** No terminal do Ubuntu (procure "Ubuntu" no menu Iniciar):
 
 ```bash
 git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
-cd ~/orquestra && ./install.sh
-source ~/.bashrc      # ou abra um terminal novo
-nvo doctor            # deve terminar com "pronto para orquestrar."
+cd ~/orquestra && ./install.sh --tudo
 ```
 
-#### 6. Provar que ficou tudo funcionando
-
-Antes de usar num projeto de verdade, rode:
+O `--tudo` instala o que falta e não é nosso: `tmux`, `jq`, Node.js e o próprio Claude Code. Depois, `claude` uma vez para fazer login, `source ~/.bashrc`, e:
 
 ```bash
-nvo autoteste
+nvo autoteste     # prova o fluxo inteiro sem gastar token — 13 passos
 ```
 
-Ele executa o fluxo inteiro — cria um repositório temporário, cria um agente, lê a tela dele, envia instrução, mostra o diff, religa depois de uma queda simulada, aprova com merge e confere que o firewall bloqueia comando destrutivo. Usa um harness de mentira (`bash`) no lugar do Claude, então **não gasta um token**, roda numa sessão tmux separada e apaga tudo no fim: sua sessão e seus projetos não são tocados.
+Passou nos 13, está pronto.
 
-```
-nvo autoteste — provando o fluxo completo sem gastar token
+#### Por que preciso do Ubuntu se eu uso Windows?
 
-  ✓ criar um repositorio git de teste
-  ✓ criar um agente (worktree + branch + janela)
-  ✓ religar apos queda
-  ✓ aprovar (merge no projeto)
-  ✓ o firewall bloqueia comando destrutivo
+Pergunta justa, e a resposta não é "porque o Claude Code exige" — ele **roda nativo no Windows**, direto no PowerShell.
 
-tudo funcionou: 13 de 13 passos.
-```
+Quem exige é o Orquestra. Ele é feito de duas peças que não existem no Windows nativo:
 
-Se algum passo falhar, ele mostra o comando exato para você repetir e ver o erro.
+- **bash** — os ~1.700 linhas do `nvo` são script de shell Unix;
+- **tmux** — é ele que mantém cada agente vivo numa janela própria, deixa a gente ler a tela sem interromper e continuar rodando depois que você fecha o terminal. O Windows não tem equivalente disso que dê para automatizar.
 
-#### 7. Onde deixar os seus projetos
+O WSL2 não é "instalar outro sistema para cuidar": é um recurso do próprio Windows, um comando, e some da sua vista depois. Seus arquivos, seu VS Code e seu navegador continuam sendo os do Windows.
 
-**Deixe os projetos dentro do Linux (`~/projetos/...`), não em `/mnt/c/...`.** O Orquestra cria uma cópia de trabalho isolada por agente (git worktree), e no disco do Windows visto pelo WSL isso fica lento a ponto de atrapalhar, além de embaralhar permissões de arquivo.
+Uma versão nativa de Windows significaria reescrever o motor em PowerShell e trocar o tmux por uma camada de ConPTY — é um projeto, não um ajuste. Se isso for importante para você, [abra uma issue](https://github.com/rodrigolinss/orquestra/issues) dizendo; é o tipo de coisa que se decide pela demanda.
 
-Se o seu código já está no Windows, clone de novo do lado do Linux:
+#### O que muda no Windows
+
+**Você tem:** a CLI completa — criar agentes, acompanhar, aprovar com merge, tudo.
+**Você não tem:** o app visual (é SwiftUI, exclusivo da Apple) e as notificações do sistema. O acompanhamento é pelo `nvo ls` e pelo `nvo attach`.
+
+#### Onde deixar os seus projetos
+
+**Dentro do Linux (`~/projetos/...`), não em `/mnt/c/...`.** O Orquestra cria uma cópia de trabalho isolada por agente, e no disco do Windows visto pelo WSL isso fica lento a ponto de atrapalhar, além de embaralhar permissões.
+
+Se o seu código está no Windows, clone de novo do lado do Linux:
 
 ```bash
 mkdir -p ~/projetos && cd ~/projetos
@@ -170,9 +136,17 @@ git clone <url-do-seu-repo>
 nvo init ~/projetos/<seu-repo>
 ```
 
-Para abrir esses arquivos no VS Code do Windows, use a extensão **WSL** e o comando `code .` de dentro do Ubuntu — ele abre a janela do Windows editando os arquivos do Linux, sem a perda de desempenho.
+Para editar isso no VS Code do Windows, instale a extensão **WSL** e rode `code .` de dentro do Ubuntu: abre a janela do Windows editando os arquivos do Linux, sem perda de desempenho.
 
-#### 8. O dia a dia sem o app
+#### Se algo der errado
+
+```bash
+nvo doctor        # aponta o que falta e como resolver
+```
+
+Ele detecta a pegadinha mais comum: o WSL enxerga o `PATH` do Windows, então um `claude.exe` ou `git.exe` instalado no lado Windows aparece no terminal do Ubuntu e é encontrado primeiro — mas não entende caminhos `/home/...` e quebra de formas difíceis de diagnosticar. O doctor diz qual programa está vindo do lado errado.
+
+#### O dia a dia sem o app
 
 ```bash
 nvo maestro                          # o chefe: fale com ele em português
@@ -180,23 +154,10 @@ nvo ls                               # status de todos os agentes, colorido
 nvo attach                           # entra na visão ao vivo (tmux)
 nvo diff <nome>                      # o que o agente mudou
 nvo done <nome>                      # aprova: pede o nome digitado e faz o merge
+nvo religar --todos                  # terminal caiu? recria e retoma o contexto
 ```
 
-Duas teclas do tmux que você vai usar: **`Ctrl-b` depois `d`** sai da visão ao vivo sem matar nada, e **`Ctrl-b` depois `n`** passa para a próxima janela. Fechar o terminal também não mata os agentes — eles seguem rodando, e o `nvo ls` mostra o estado quando você voltar.
-
-Se a máquina reiniciar ou o terminal cair, `nvo religar --todos` recria as janelas e manda cada agente continuar de onde parou.
-
-O diagnóstico no Windows termina assim (sem a linha do app, que é só do macOS):
-
-```
-nvo doctor — diagnostico do ambiente
-  ✓ plataforma: Windows via WSL2 (Ubuntu)
-  ✓ tmux 3.4
-  ✓ git 2.43 · identidade configurada
-  ✓ Claude Code instalado
-  ✓ hook de seguranca configurado
-pronto para orquestrar.
-```
+Duas teclas do tmux: **`Ctrl-b` depois `d`** sai da visão ao vivo sem matar nada, e **`Ctrl-b` depois `n`** vai para a próxima janela. Fechar o terminal também não mata os agentes — eles seguem rodando.
 
 O instalador é idempotente e só preenche as lacunas: instala `tmux`/`jq` se faltarem, conecta o hook de segurança, adiciona a CLI ao seu `PATH` e compila o app nativo quando as Xcode Command Line Tools estão presentes. Ao final, faz um diagnóstico completo do ambiente:
 

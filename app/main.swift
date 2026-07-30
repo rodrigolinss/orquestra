@@ -1639,7 +1639,11 @@ struct PromptField: View {
             TextField(placeholder, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...10)
-                .frame(maxHeight: 190)
+                // Abraca o texto: uma linha quando vazio, crescendo ate dez.
+                // So o lineLimit ja limita a altura — um "maxHeight" aqui era
+                // convite para o campo esticar ate o teto quando sobrava
+                // espaco no card, e ficava uma caixa gigante e vazia.
+                .fixedSize(horizontal: false, vertical: true)
                 // nunca deixa o card espremer o campo abaixo do que ele
                 // precisa: quem cede espaco e a area de conversa/terminal
                 // acima, que ja rola por conta propria

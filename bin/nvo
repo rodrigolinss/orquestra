@@ -50,6 +50,45 @@ NVO_MAX_AGENTS="${NVO_MAX_AGENTS:-8}"
 # SEM --dangerously-skip-permissions (regra 2 do SPEC).
 AGENT_CMD="${NVO_AGENT_CMD:-claude}"
 
+HARNESSES="$ORQ/bin/harnesses.conf"
+
+# Campo N da linha do harness, ou vazio se o harness nao existe no registro.
+harness_field() {
+  local id="$1" n="$2"
+  [ -f "$HARNESSES" ] || return 0
+  awk -F'|' -v id="$id" -v n="$n" \
+    '/^[[:space:]]*#/ {next} NF>=7 && $1==id {print $n; exit}' "$HARNESSES"
+}
+
+harness_exists() { [ -n "$(harness_field "$1" 1)" ]; }
+
+# Monta a linha de comando do harness ja com o modelo aplicado.
+harness_launch() {
+  local id="$1" model="$2" tpl
+  if [ -n "$model" ]; then
+    tpl="$(harness_field "$id" 4)"
+    tpl="${tpl//%M%/$model}"
+  else
+    tpl="$(harness_field "$id" 5)"
+  fi
+  printf '%s' "$tpl"
+}
+
+# Lista os harnesses em formato estavel para o app consumir:
+#   id \t rotulo \t instalado(0|1) \t modelos \t como instalar
+cmd_harnesses() {
+  [ -f "$HARNESSES" ] || die "registro de harnesses nao encontrado: $HARNESSES"
+  local id label bin models install
+  while IFS='|' read -r id label bin _ _ models install; do
+    case "$id" in ''|\#*) continue ;; esac
+    if command -v "$bin" >/dev/null 2>&1; then
+      printf '%s\t%s\t1\t%s\t%s\n' "$id" "$label" "$models" "$install"
+    else
+      printf '%s\t%s\t0\t%s\t%s\n' "$id" "$label" "$models" "$install"
+    fi
+  done < "$HARNESSES"
+}
+
 die() { echo "nvo: $*" >&2; exit 1; }
 
 usage() {
@@ -152,13 +191,21 @@ cmd_new() {
 
   [ $# -ge 2 ] || die 'uso: nvo new [--plan] [--parent <nome>] <nome> "<tarefa>" [claude|codex] [modelo]'
   local name="$1" task="$2" cli="${3:-$AGENT_CMD}" model="${4:-}"
-  case "$cli" in
-    claude|codex|bash) ;;
-    *) die "cli invalida '$cli' (use claude ou codex)" ;;
-  esac
-  [ -z "$model" ] || printf '%s' "$model" | grep -Eq '^[A-Za-z0-9._-]+$' \
+  # o harness vem do registro (bin/harnesses.conf); "bash" fica de fora dele
+  # de proposito, e so para teste
+  local hbin hinstall
+  if [ "$cli" = "bash" ]; then
+    hbin="bash"
+  else
+    harness_exists "$cli" || die \
+      "harness '$cli' desconhecido. Disponiveis: $(cmd_harnesses | cut -f1 | tr '\n' ' ')"
+    hbin="$(harness_field "$cli" 3)"
+    hinstall="$(harness_field "$cli" 7)"
+  fi
+  [ -z "$model" ] || printf '%s' "$model" | grep -Eq '^[A-Za-z0-9._/-]+$' \
     || die "modelo invalido '$model'"
-  command -v "$cli" >/dev/null 2>&1 || die "'$cli' nao esta instalado (veja nvo doctor)"
+  command -v "$hbin" >/dev/null 2>&1 || die \
+    "'$hbin' nao esta instalado (harness $cli).${hinstall:+ Para instalar: $hinstall}"
   check_name "$name"
   load_project
 
@@ -174,11 +221,14 @@ cmd_new() {
     depth=$((pdepth + 1))
     [ "$depth" -le "$NVO_MAX_DEPTH" ] || die \
       "profundidade $depth excede o limite de $NVO_MAX_DEPTH: '$parent' ja esta na ultima camada que pode delegar. Peca a ele para fazer a tarefa, ou crie o agente direto no maestro."
-    filhos="$(grep -l "^parent=$parent$" "$META_ROOT/$PROJ"/*.meta 2>/dev/null | wc -l | tr -d ' ')"
+    # grep sem resultado sai com 1 e o pipefail derrubaria o script inteiro
+    filhos="$(grep -l "^parent=$parent$" "$META_ROOT/$PROJ"/*.meta 2>/dev/null | wc -l | tr -d ' ' || true)"
+    [ -n "$filhos" ] || filhos=0
     [ "$filhos" -lt "$NVO_MAX_FANOUT" ] || die \
       "'$parent' ja tem $filhos subagentes (limite $NVO_MAX_FANOUT). Espere um terminar, ou junte as tarefas."
   fi
-  vivos="$(ls -1 "$META_ROOT/$PROJ"/*.meta 2>/dev/null | wc -l | tr -d ' ')"
+  vivos="$(ls -1 "$META_ROOT/$PROJ"/*.meta 2>/dev/null | wc -l | tr -d ' ' || true)"
+  [ -n "$vivos" ] || vivos=0
   [ "$vivos" -lt "$NVO_MAX_AGENTS" ] || die \
     "ja existem $vivos agentes ativos (limite $NVO_MAX_AGENTS). Aprove ou descarte alguem antes de criar outro."
 
@@ -279,12 +329,12 @@ EOF
 
   ensure_session
   tmux new-window -t "$SESSION" -n "$name" -c "$wt"
-  local launch="$cli"
-  if [ -n "$model" ]; then
-    case "$cli" in
-      claude) launch="claude --model $model" ;;
-      codex)  launch="codex -m $model" ;;
-    esac
+  local launch
+  if [ "$cli" = "bash" ]; then
+    launch="bash"
+  else
+    launch="$(harness_launch "$cli" "$model")"
+    [ -n "$launch" ] || die "nao consegui montar o comando do harness '$cli'"
   fi
   tmux send-keys -t "$SESSION:$name" "$launch \"\$(cat '$meta.prompt')\"" Enter
 
@@ -687,6 +737,7 @@ case "${1:-}" in
   attach)  shift; cmd_attach "$@" ;;
   maestro) shift; cmd_maestro "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
+  harnesses) shift; cmd_harnesses "$@" ;;
   approve) shift; cmd_approve "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;

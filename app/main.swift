@@ -213,6 +213,14 @@ struct UsageInfo: Equatable {
     }
 }
 
+struct Harness: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let installed: Bool
+    let models: [String]
+    let install: String     // comando para instalar, quando falta
+}
+
 struct AgentInfo: Identifiable, Equatable {
     let name: String
     var branch: String
@@ -224,6 +232,8 @@ struct AgentInfo: Identifiable, Equatable {
     var model: String = ""
     var task: String = ""        // o que foi pedido, em uma frase
     var progress: String = ""    // ultima linha util das notas: o que ele esta fazendo agora
+    var parent: String = ""      // vazio = filho direto do maestro
+    var depth: Int = 1           // maestro e 0; agentes dele, 1; subagentes, 2
     var id: String { name }
 }
 
@@ -265,16 +275,34 @@ final class Orchestra: ObservableObject {
     @Published var lastError: String?
     @Published var codexInstalled = false
     @Published var usage: UsageInfo?
+    @Published var harnesses: [Harness] = []
 
     private var lastStatus: [String: AgentStatus] = [:]
     private var timer: Timer?
     private var usageTimer: Timer?
 
-    init() {
-        DispatchQueue.global().async {
-            let found = sh("/bin/bash", ["-lc", "command -v codex"]).code == 0
-            DispatchQueue.main.async { self.codexInstalled = found }
+    // Quais CLIs de agente existem, vindas do registro do nvo — assim adicionar
+    // um harness novo e editar um arquivo de texto, sem tocar no app.
+    func refreshHarnesses() {
+        DispatchQueue.global().async { [weak self] in
+            let r = sh(NVO, ["harnesses"])
+            guard r.code == 0 else { return }
+            let lista: [Harness] = r.out.split(separator: "\n").compactMap { linha in
+                let c = linha.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                guard c.count >= 5 else { return nil }
+                return Harness(id: c[0], label: c[1], installed: c[2] == "1",
+                               models: c[3].split(separator: ",").map(String.init),
+                               install: c[4])
+            }
+            DispatchQueue.main.async {
+                self?.harnesses = lista
+                self?.codexInstalled = lista.contains { $0.id == "codex" && $0.installed }
+            }
         }
+    }
+
+    init() {
+        refreshHarnesses()
         refresh()
         refreshUsage()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -398,12 +426,14 @@ final class Orchestra: ObservableObject {
                     let note = (try? String(contentsOfFile: "\(ORQ)/notes/\(proj)/\(name).md", encoding: .utf8)) ?? ""
                     // mesma logica do nvo: o marcador que aparece por ultimo manda
                     let status = Orchestra.statusFromNote(note)
-                    var cli = "claude", model = ""
+                    var cli = "claude", model = "", parent = "", depth = 1
                     if let meta = try? String(contentsOfFile: "\(ORQ)/agents/\(proj)/\(name).meta",
                                               encoding: .utf8) {
                         for l in meta.split(separator: "\n") {
                             if l.hasPrefix("cli=") { cli = String(l.dropFirst(4)) }
                             if l.hasPrefix("model=") { model = String(l.dropFirst(6)) }
+                            if l.hasPrefix("parent=") { parent = String(l.dropFirst(7)) }
+                            if l.hasPrefix("depth=") { depth = Int(String(l.dropFirst(6))) ?? 1 }
                         }
                     }
                     let prompt = (try? String(contentsOfFile: "\(ORQ)/agents/\(proj)/\(name).prompt",
@@ -413,7 +443,8 @@ final class Orchestra: ObservableObject {
                                           note: String(note.suffix(8000)),
                                           cli: cli, model: model,
                                           task: resumoTarefa(prompt),
-                                          progress: ultimoProgresso(note)))
+                                          progress: ultimoProgresso(note),
+                                          parent: parent, depth: depth))
                 }
             }
             let maestro = self.pane("maestro", lines: 40) ?? ""
@@ -959,7 +990,9 @@ struct MaestroNode: View {
                 )
         }
         .shadow(color: .black.opacity(active ? 0.5 : 0), radius: active ? 16 : 0)
-        .offset(x: liveX, y: liveY)
+        // .position e layout de verdade (.offset e so visual): as ancoras dos
+        // cabos resolvem na posicao real e seguem o card durante o arraste
+        .position(x: liveX + liveW / 2, y: liveY + liveH / 2)
         .zIndex(active ? 10 : 0)
         .anchorPreference(key: NodeAnchors.self, value: .bottom) { ["maestro": $0] }
     }
@@ -1157,8 +1190,18 @@ struct AgentNode: View {
                     .foregroundColor(Theme.dim)
                     .help("arquivos modificados no espaço isolado deste agente")
             }
-            Text("\(agent.branch)  ·  \(agent.cli)\(agent.model.isEmpty ? "" : " · \(agent.model)")")
-                .font(.system(size: Theme.uiSize(9), design: .monospaced)).foregroundColor(Theme.dim)
+            HStack(spacing: 5) {
+                Text("\(agent.branch)  ·  \(agent.cli)\(agent.model.isEmpty ? "" : " · \(agent.model)")")
+                    .font(.system(size: Theme.uiSize(9), design: .monospaced)).foregroundColor(Theme.dim)
+                if !agent.parent.isEmpty {
+                    Text("sub de \(agent.parent)")
+                        .font(.system(size: Theme.uiSize(8), weight: .semibold, design: .monospaced))
+                        .foregroundColor(Theme.accent.opacity(0.85))
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Theme.accent.opacity(0.12)).cornerRadius(3)
+                        .help("este agente foi criado por \(agent.parent), na camada \(agent.depth)")
+                }
+            }
 
             // O que ele foi contratado para fazer e onde esta — decidir aprovar
             // ou descartar nao pode exigir a leitura da tela do terminal.
@@ -1267,9 +1310,10 @@ struct AgentNode: View {
                 )
         }
         .shadow(color: .black.opacity(active ? 0.5 : 0), radius: active ? 16 : 0)
-        .offset(x: liveX, y: liveY)
+        // .position e layout de verdade (.offset e so visual): as ancoras dos
+        // cabos resolvem na posicao real e seguem o card durante o arraste
+        .position(x: liveX + liveW / 2, y: liveY + liveH / 2)
         .zIndex(active ? 10 : 0)
-        // a ancora e lida depois do offset, entao o cabo segue o card movido
         .anchorPreference(key: NodeAnchors.self, value: .top) { ["agent-\(agent.name)": $0] }
     }
 }
@@ -1708,23 +1752,61 @@ struct NewAgentSheet: View {
 
             TextField("nome (ex: builder)", text: $name)
                 .textFieldStyle(.roundedBorder).font(.system(size: Theme.uiSize(12), design: .monospaced))
-            if orch.codexInstalled {
-                Picker("", selection: $cli) {
-                    Text("Claude Code").tag("claude")
-                    Text("Codex").tag("codex")
+            // Escolha do harness. Mostramos tambem os que faltam, com o comando
+            // de instalacao: saber que a opcao existe vale mais do que uma lista
+            // curta que finge que so ha uma escolha.
+            VStack(alignment: .leading, spacing: 5) {
+                Text("quem vai executar")
+                    .font(.system(size: Theme.uiSize(10), weight: .semibold)).foregroundColor(Theme.dim)
+                ForEach(orch.harnesses) { h in
+                    Button {
+                        guard h.installed else { return }
+                        cli = h.id
+                        model = ""
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: cli == h.id ? "largecircle.fill.circle" : "circle")
+                                .font(.system(size: Theme.uiSize(11)))
+                                .foregroundColor(h.installed ? (cli == h.id ? Theme.accent : Theme.dim)
+                                                             : Theme.dim.opacity(0.4))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(h.label)
+                                    .font(.system(size: Theme.uiSize(11),
+                                                  weight: cli == h.id ? .semibold : .regular))
+                                    .foregroundColor(h.installed ? Theme.text : Theme.dim.opacity(0.6))
+                                if !h.installed {
+                                    Text("não instalado · \(h.install)")
+                                        .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                                        .foregroundColor(Theme.dim.opacity(0.7))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 7).padding(.vertical, 4)
+                        .background(cli == h.id ? Theme.accent.opacity(0.10) : .clear)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!h.installed)
+                    .help(h.installed ? "usar \(h.label) neste agente"
+                                      : "instale com: \(h.install)")
                 }
-                .pickerStyle(.segmented)
             }
-            if cli == "claude" {
+
+            // modelos do harness escolhido, direto do registro
+            if let atual = orch.harnesses.first(where: { $0.id == cli }), !atual.models.isEmpty {
                 Picker("", selection: $model) {
                     Text("modelo padrão").tag("")
-                    Text("Sonnet — rápido e econômico").tag("sonnet")
-                    Text("Opus — máxima capacidade").tag("opus")
-                    Text("Haiku — ultra barato").tag("haiku")
+                    ForEach(atual.models, id: \.self) { m in
+                        Text(m).tag(m)
+                    }
                 }
                 .pickerStyle(.menu)
-                Text("dica: Sonnet resolve a maioria das tarefas de builder por ~40% do custo do Opus")
-                    .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                if cli == "claude" {
+                    Text("dica: Sonnet resolve a maioria das tarefas de builder por ~40% do custo do Opus")
+                        .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                }
             }
             Toggle(isOn: $planFirst) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -2170,8 +2252,8 @@ struct ContentView: View {
                                  : "os agentes que o maestro criar aparecem aqui, conectados a ele")
                                 .font(.system(size: Theme.uiSize(11), design: .monospaced))
                                 .foregroundColor(Theme.dim)
-                                .offset(x: layout.maestroBox.x,
-                                        y: layout.maestroBox.y + layout.maestroBox.h + 40)
+                                .position(x: layout.maestroBox.x + layout.maestroBox.w / 2,
+                                          y: layout.maestroBox.y + layout.maestroBox.h + 46)
                         }
                     }
                     .frame(width: canvas.width, height: canvas.height, alignment: .topLeading)
@@ -2181,32 +2263,42 @@ struct ContentView: View {
                         GeometryReader { proxy in
                             if let m = anchors["maestro"] {
                                 let mp = proxy[m]
-                                let ends = anchors
-                                    .filter { $0.key.hasPrefix("agent-") }
-                                    .sorted { $0.key < $1.key }
-                                    .map { proxy[$0.value] }
+                                // Cada agente liga ao PAI dele, nao ao maestro: e o
+                                // cabo que mostra quem delegou o que. Subagente cujo
+                                // pai ja saiu cai de volta no maestro, para nao
+                                // sumir da arvore.
+                                let links: [(CGPoint, CGPoint, Int)] = orch.agents.compactMap { a in
+                                    guard let dest = anchors["agent-\(a.name)"] else { return nil }
+                                    let origem: CGPoint = {
+                                        if !a.parent.isEmpty, let pa = anchors["agent-\(a.parent)"] {
+                                            return proxy[pa]
+                                        }
+                                        return mp
+                                    }()
+                                    return (origem, proxy[dest], a.depth)
+                                }
                                 ZStack(alignment: .topLeading) {
                                     Path { p in
-                                        for ap in ends {
+                                        for (from, to, _) in links {
                                             // fio com folga: o caimento cresce com a
                                             // distancia, como um cabo real pendurado
-                                            let dx = ap.x - mp.x
-                                            let dy = ap.y - mp.y
+                                            let dx = to.x - from.x
+                                            let dy = to.y - from.y
                                             let dist = (dx * dx + dy * dy).squareRoot()
                                             let sag = max(26, min(150, dist * 0.22))
-                                            p.move(to: mp)
-                                            p.addCurve(to: ap,
-                                                control1: CGPoint(x: mp.x + dx * 0.12, y: mp.y + sag),
-                                                control2: CGPoint(x: ap.x - dx * 0.12, y: ap.y - sag * 0.35))
+                                            p.move(to: from)
+                                            p.addCurve(to: to,
+                                                control1: CGPoint(x: from.x + dx * 0.12, y: from.y + sag),
+                                                control2: CGPoint(x: to.x - dx * 0.12, y: to.y - sag * 0.35))
                                         }
                                     }
                                     .stroke(Theme.cable, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
                                     // conectores nas pontas, como plugues
                                     Circle().fill(Theme.accent.opacity(0.6))
                                         .frame(width: 6, height: 6).position(mp)
-                                    ForEach(Array(ends.enumerated()), id: \.offset) { _, ap in
+                                    ForEach(Array(links.enumerated()), id: \.offset) { _, l in
                                         Circle().fill(Theme.accent.opacity(0.6))
-                                            .frame(width: 6, height: 6).position(ap)
+                                            .frame(width: 6, height: 6).position(l.1)
                                     }
                                 }
                             }

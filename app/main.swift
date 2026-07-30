@@ -1112,9 +1112,11 @@ final class Orchestra: ObservableObject {
 
     // Merge sem sair do app. A confirmacao viaja como argumento do --confirm; no
     // terminal o nvo continua pedindo o nome quando ninguem passa a flag.
-    func doneAgent(_ name: String, confirm: String, done: @escaping (String?) -> Void) {
+    func doneAgent(_ name: String, confirm: String, salvando: Bool = false,
+                   done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            let r = self.nvo(["done", name, "--confirm", confirm])
+            let r = self.nvo(salvando ? ["done", name, "--salvar", "--confirm", confirm]
+                                      : ["done", name, "--confirm", confirm])
             let saida = (r.err + "\n" + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async {
                 done(r.code == 0 ? nil : (saida.isEmpty ? "o merge falhou (código \(r.code))" : saida))
@@ -3528,6 +3530,9 @@ struct DoneSheet: View {
     @State private var diff = "carregando o diff…"
     @State private var error: String?
     @State private var merging = false
+    // vira true quando descobrimos que o agente terminou sem salvar no git:
+    // o proximo clique salva por ele em vez de repetir o mesmo erro
+    @State private var salvarJunto = false
 
     private var verificacao: Verificacao? {
         orch.agents.first(where: { $0.name == name })?.verificacao
@@ -3583,10 +3588,13 @@ struct DoneSheet: View {
             HStack {
                 Spacer()
                 SmallButton(label: "cancelar") { dismiss() }
-                SmallButton(label: merging ? "aplicando…" : "aplicar no projeto",
+                SmallButton(label: merging ? "aplicando…"
+                                : (salvarJunto ? "salvar e aplicar" : "aplicar no projeto"),
                             icon: "checkmark.seal",
                             tint: AgentStatus.concluido.color,
-                            help: "faz o merge de agent/\(name) no projeto",
+                            help: salvarJunto
+                                ? "salva no histórico o que \(name) deixou solto e aplica no projeto"
+                                : "faz o merge de agent/\(name) no projeto",
                             action: aplicar)
             }
             .layoutPriority(1)
@@ -3607,9 +3615,20 @@ struct DoneSheet: View {
         // O clique no botao E a confirmacao: o diff esta na tela logo acima.
         // O nome vai para o --confirm do nvo, que continua exigindo o valor
         // exato; quem digita, na interface grafica, e o app.
-        orch.doneAgent(name, confirm: name) { err in
+        orch.doneAgent(name, confirm: name, salvando: salvarJunto) { err in
             merging = false
-            if let err = err { error = err } else { dismiss() }
+            if let err = err {
+                // O agente terminou sem salvar no git. Em vez de devolver o
+                // recado tecnico e deixar a pessoa presa, oferecemos o botao
+                // que resolve — o orquestra salva por ele e aplica.
+                if err.contains("mudancas nao commitadas") {
+                    salvarJunto = true
+                    error = "Este agente terminou sem salvar o trabalho dele no histórico. "
+                          + "Clique de novo em “aplicar no projeto” que o Orquestra salva por ele e aplica."
+                } else {
+                    error = err
+                }
+            } else { dismiss() }
         }
     }
 }

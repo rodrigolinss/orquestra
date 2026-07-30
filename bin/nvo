@@ -365,7 +365,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo aprender "<licao>"       registra uma licao no aprendizado do projeto
   nvo collisions               avisa quais agentes vivos mexem no mesmo arquivo
   nvo status <nome>            situacao do check e colisoes em chave=valor
-  nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
+  nvo done <nome> [--salvar]   mostra diff, pede confirmacao, faz merge --no-ff
+                               --salvar: commita o que o agente deixou solto
   nvo kill <nome>              encerra janela e remove worktree SEM merge
   nvo attach                   entra na sessao tmux deste projeto
   nvo projects                 lista os projetos ja usados e agentes vivos
@@ -719,6 +720,11 @@ Contexto e regras obrigatorias:
   de variavel, ordem dos arquivos, formatacao) resolva voce mesmo e registre.
 - Ao fim de cada etapa, registre progresso e decisoes em $note (secoes com
   data/hora). O orquestrador le essas notas em vez de ler sua tela.
+- SALVE O SEU TRABALHO NO GIT antes de dizer que terminou. Trabalho nao
+  commitado nao existe para quem vai revisar: e a pessoa clicando em aprovar e
+  vendo um diff vazio. Na sua copia isolada, faca:
+      git add -A && git commit -m "<o que voce fez, em uma linha>"
+  Commite tambem no meio do caminho, a cada etapa que fecha.
 - Antes de escrever "STATUS: CONCLUIDO", rode: nvo check $name
   Se o resultado for ok ou sem_teste, registre na nota e conclua. Se falhar,
   conserte e rode de novo; se nao conseguir consertar, escreva "STATUS:
@@ -1443,11 +1449,22 @@ cmd_diff() {
     echo "aviso: a base '$base' andou $behind commit(s) desde que este agente comecou"
     echo
   fi
-  # diff a partir do ponto de partida comum (merge-base), nao da ponta atual
-  # da base, senao commits novos da base aparecem como se o agente os tivesse
-  # apagado. A forma "base..." (tres pontos, sem lado direito) compara contra
-  # merge-base e ainda inclui mudancas nao commitadas no worktree.
-  git -C "$wt" diff "$base"...
+  # Trabalho ainda nao salvo TEM de aparecer: agente que termina sem commitar
+  # e comum, e um diff vazio faz a pessoa achar que ele nao fez nada.
+  local sujo; sujo="$(git -C "$wt" status --porcelain)"
+  if [ -n "$sujo" ]; then
+    echo "aviso: $(printf '%s\n' "$sujo" | wc -l | tr -d ' ') arquivo(s) ainda nao salvos pelo agente"
+    echo "       (aparecem no diff abaixo; ao aprovar, o orquestra salva por ele)"
+    echo
+  fi
+  # Arquivo NOVO nao aparece em "git diff" enquanto o git nao souber que ele
+  # existe. O "-N" registra so a intencao de incluir (nao guarda conteudo, nao
+  # commita nada) e e o que faz o arquivo novo do agente aparecer na revisao.
+  git -C "$wt" add -A -N >/dev/null 2>&1 || true
+  # Comparamos contra o COMMIT de partida comum, nao contra "base..." (tres
+  # pontos): a forma de tres pontos para no ultimo commit do agente e esconde
+  # justamente o que ele deixou sem salvar.
+  git -C "$wt" diff "$mb"
 }
 
 # Escolhe harness+modelo baratos para "nvo explain": prefere claude com o
@@ -1650,9 +1667,10 @@ cmd_review() {
 }
 
 cmd_done() {
-  local name="" confirm="" have_confirm=0
+  local name="" confirm="" have_confirm=0 salvar=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --salvar) salvar=1; shift ;;
       # A confirmacao pode vir por argumento para que uma interface grafica
       # colete o nome digitado. A regra 6 continua de pe: sem o nome exato
       # nao ha merge — o que muda e onde o humano digita, nao se ele digita.
@@ -1664,7 +1682,7 @@ cmd_done() {
           name="$1"; shift ;;
     esac
   done
-  [ -n "$name" ] || die "uso: nvo done <nome> [--confirm <nome>]"
+  [ -n "$name" ] || die "uso: nvo done <nome> [--salvar] [--confirm <nome>]"
   load_project
   local wt base branch
   agent_exists "$name" || die "agente '$name' nao existe"
@@ -1673,8 +1691,21 @@ cmd_done() {
   base="$(get_base "$name")"
   branch="agent/$name"
 
-  [ -z "$(git -C "$wt" status --porcelain)" ] \
-    || die "o worktree de '$name' tem mudancas nao commitadas; peca ao agente para commitar (nvo send $name \"commite seu trabalho\")"
+  # Agente que termina sem salvar e comum — ele escreve STATUS: CONCLUIDO e
+  # esquece o commit. Antes isso virava um beco: a aprovacao falhava e a pessoa
+  # tinha de ir pedir ao agente. Agora o orquestra salva por ele, com autoria
+  # dele, e diz que fez isso.
+  if [ -n "$(git -C "$wt" status --porcelain)" ]; then
+    if [ "$salvar" = 1 ]; then
+      echo "-> salvando o trabalho que '$name' deixou sem commitar"
+      git -C "$wt" add -A
+      git -C "$wt" -c user.name="orquestra ($name)" -c user.email="orquestra@local" \
+        commit -qm "trabalho de $name (salvo na aprovacao)" \
+        || die "nao consegui salvar o trabalho de '$name'"
+    else
+      die "o worktree de '$name' tem mudancas nao commitadas. Aprove com --salvar para o orquestra salvar por ele, ou peca: nvo send $name \"commite seu trabalho\""
+    fi
+  fi
 
   echo "== diff de $branch contra $base:"
   git -C "$REPO" diff "$base...$branch" || true

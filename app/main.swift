@@ -1252,8 +1252,10 @@ final class AgentLayout: ObservableObject {
     // "@" nao e valido em nome de agente, entao a chave nunca colide
     static let maestroKey = "@maestro"
     // x = (1076 - 760) / 2: maestro centrado sobre o cluster de 3 colunas
-    // y=76 deixa espaco para o cartao de passo que fica ancorado acima dele
-    static let maestroDefault = Box(x: 158, y: 76, w: 760, h: 470)
+    // y=560 pre-aloca folga ACIMA do maestro para arrastar cards para cima;
+    // a visao abre centrada nele, entao a folga so aparece quando usada.
+    // O cartao de passo ancora logo acima do topo dele.
+    static let maestroDefault = Box(x: 158, y: 560, w: 760, h: 470)
     static let maestroMinW: CGFloat = 480
     static let maestroMinH: CGFloat = 300
     // as vagas dos agentes comecam abaixo do maestro, com folga para os cabos
@@ -2629,6 +2631,7 @@ struct ContentView: View {
     @State private var openFile: String?
     @State private var tab: Aba = .painel
     @State private var pinchBase: CGFloat = 0
+    @State private var centerTick = 0
     @ObservedObject private var scale = UIScale.shared
     @ObservedObject private var layout = AgentLayout.shared
 
@@ -2755,10 +2758,17 @@ struct ContentView: View {
                         .help("aproximar o canvas (⌘=)")
                     }
                 }
+                if tab == .painel {
+                    SmallButton(label: "centralizar", icon: "scope",
+                                help: "traz a visão de volta para o maestro (útil depois de navegar longe)") {
+                        centerTick += 1
+                    }
+                }
                 if tab == .painel, layout.isCustomized {
                     SmallButton(label: "realinhar", icon: "square.grid.2x2",
                                 help: "devolve todos os cards ao tamanho e à posição automáticos") {
                         withAnimation(.easeOut(duration: 0.2)) { layout.resetAll() }
+                        centerTick += 1
                     }
                 }
                 if tab == .painel, orch.project != nil {
@@ -2850,6 +2860,7 @@ struct ContentView: View {
             // crescimento do canvas re-centralizaria tudo, "empurrando" os cards
             // de volta durante o arraste — em ultrawide isso travava o lado.
             GeometryReader { viewport in
+            ScrollViewReader { scroller in
             ScrollView([.vertical, .horizontal]) {
                 VStack(alignment: .leading, spacing: 40) {
                     // canvas livre com origem fixa no canto superior esquerdo:
@@ -2861,6 +2872,17 @@ struct ContentView: View {
                         PanArea()
                             .frame(width: canvas.width, height: canvas.height)
                             .help("arraste o fundo para mover a visão do canvas")
+                        // marcador invisivel no centro do maestro, com frame de
+                        // layout REAL (spacers, nao .position): e o alvo do
+                        // scrollTo que centraliza a visao ao abrir e no realinhar
+                        HStack(spacing: 0) {
+                            Spacer().frame(width: max(0, layout.maestroBox.x + layout.maestroBox.w / 2))
+                            VStack(spacing: 0) {
+                                Spacer().frame(height: max(0, layout.maestroBox.y + layout.maestroBox.h / 2))
+                                Color.clear.frame(width: 1, height: 1).id("foco-maestro")
+                            }
+                        }
+                        .allowsHitTesting(false)
                         MaestroNode(orch: orch)
                         // o cartao de passo ACOMPANHA o maestro: fica ancorado
                         // logo acima dele, onde quer que ele esteja
@@ -2974,10 +2996,21 @@ struct ContentView: View {
                 // desloca apenas cards nunca movidos, e muda so em resize —
                 // nunca durante um gesto, entao nada e "puxado de volta"
                 .onAppear {
-                    layout.originX = max(0, (viewport.size.width - 48 - 1076) / 2)
+                    // 1400 de folga a esquerda: e o espaco para arrastar cards
+                    // para la — a visao abre centrada no maestro, entao a folga
+                    // so aparece quando voce vai ate ela
+                    layout.originX = 1400 + max(0, (viewport.size.width - 48 - 1076) / 2)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        scroller.scrollTo("foco-maestro", anchor: .center)
+                    }
                 }
                 .onChange(of: viewport.size.width) { w in
-                    layout.originX = max(0, (w - 48 - 1076) / 2)
+                    layout.originX = 1400 + max(0, (w - 48 - 1076) / 2)
+                }
+                .onChange(of: centerTick) { _ in
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        scroller.scrollTo("foco-maestro", anchor: .center)
+                    }
                 }
             }
             // pinca do trackpad: zoom incremental em cima do valor atual
@@ -2989,6 +3022,7 @@ struct ContentView: View {
                     }
                     .onEnded { _ in pinchBase = 0 }
             )
+            }
             }
             .background(Theme.bg)
             if let f = openFile {

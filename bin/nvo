@@ -60,6 +60,9 @@ config_spec() {
     max_agents) echo "1|24|agentes vivos ao mesmo tempo|Teto somando todas as camadas. Cada agente ativo consome contexto e janela de uso — 12 é confortável no plano Max; acima de 16 a janela de 5h costuma estourar." ;;
     # min vazio marca "texto livre" (nao numerico) para cmd_config
     verify) echo "|-|comando de verificação|Comando que 'nvo check' roda dentro da copia do agente. Vazio: nvo tenta descobrir pelo repositorio (package.json, pytest, Makefile, Cargo.toml, go.mod, app/build.sh)." ;;
+    prefer_build)  echo "|-|fornecedor preferido para construir|Id do harness (ex.: claude, codex, gemini) que 'nvo route' recomenda para tarefas de construção comum, quando instalado. Vazio: decide pela heurística." ;;
+    prefer_review) echo "|-|fornecedor preferido para revisar|Id do harness que 'nvo route' recomenda para revisão/conferência, quando instalado. Vazio: decide pela heurística (fornecedor diferente de quem construiu)." ;;
+    avoid_harness) echo "|-|fornecedores a evitar|Ids de harness (separados por vírgula) que 'nvo route' nunca recomenda, mesmo instalados." ;;
     *) return 1 ;;
   esac
 }
@@ -69,7 +72,7 @@ config_spec() {
 cmd_config() {
   local chave valor spec min max rotulo ajuda
   if [ $# -eq 0 ]; then
-    for chave in max_depth max_fanout max_agents verify; do
+    for chave in max_depth max_fanout max_agents verify prefer_build prefer_review avoid_harness; do
       spec="$(config_spec "$chave")"
       IFS='|' read -r min max rotulo ajuda <<EOF
 $spec
@@ -79,6 +82,9 @@ EOF
         max_fanout) valor="$NVO_MAX_FANOUT" ;;
         max_agents) valor="$NVO_MAX_AGENTS" ;;
         verify)     valor="$(config_get verify "")" ;;
+        prefer_build)  valor="$(config_get prefer_build "")" ;;
+        prefer_review) valor="$(config_get prefer_review "")" ;;
+        avoid_harness) valor="$(config_get avoid_harness "")" ;;
       esac
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$chave" "$valor" "$min" "$max" "$rotulo" "$ajuda"
     done
@@ -87,7 +93,7 @@ EOF
 
   [ $# -eq 2 ] || die "uso: nvo config [<chave> <valor>]"
   chave="$1"; valor="$2"
-  spec="$(config_spec "$chave")" || die "chave desconhecida '$chave' (use: max_depth, max_fanout, max_agents, verify)"
+  spec="$(config_spec "$chave")" || die "chave desconhecida '$chave' (use: max_depth, max_fanout, max_agents, verify, prefer_build, prefer_review, avoid_harness)"
   IFS='|' read -r min max rotulo ajuda <<EOF
 $spec
 EOF
@@ -150,6 +156,152 @@ cmd_harnesses() {
   done < "$HARNESSES"
 }
 
+# Procura no texto da tarefa o id ou o rotulo de algum harness do registro
+# (instalado ou nao) — usado por "nvo route" para saber quem construiu o que
+# vai ser revisado, quando a pessoa cita isso na descricao (ex.: "revisar o
+# que o codex fez").
+detect_builder_harness() {
+  local low="$1" id label
+  [ -f "$HARNESSES" ] || return 1
+  while IFS='|' read -r id label _ _ _ _ _; do
+    case "$id" in ''|\#*) continue ;; esac
+    local idlow lbllow
+    idlow="$(printf '%s' "$id" | tr '[:upper:]' '[:lower:]')"
+    lbllow="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+    case "$low" in
+      *"$idlow"*|*"$lbllow"*) printf '%s' "$id"; return 0 ;;
+    esac
+  done < "$HARNESSES"
+  return 1
+}
+
+# Escolhe o modelo de um harness para uma "forma" de tarefa (mecanica,
+# construcao, critica). Para os 4 harnesses que ja conhecemos, o mapeamento e
+# manual porque sabemos o que cada modelo custa de verdade. Para qualquer
+# harness desconhecido (o proprio dono acrescentou ao harnesses.conf), caimos
+# na convencao ja documentada em pick_explain_harness: primeiro modelo da
+# lista = padrao/mais caro, ultimo = mais barato; o do meio (se houver 3+)
+# serve de intermediario para construcao comum.
+route_pick_model() {
+  local id="$1" tier="$2" models n
+  case "$id" in
+    claude)
+      case "$tier" in critica) echo opus ;; mecanica) echo haiku ;; *) echo sonnet ;; esac
+      return 0 ;;
+    codex)
+      case "$tier" in mecanica) echo o4-mini ;; *) echo gpt-5 ;; esac
+      return 0 ;;
+    gemini)
+      case "$tier" in mecanica) echo gemini-2.5-flash ;; *) echo gemini-2.5-pro ;; esac
+      return 0 ;;
+    deepseek)
+      case "$tier" in critica) echo deepseek-reasoner ;; *) echo deepseek-chat ;; esac
+      return 0 ;;
+  esac
+  models="$(harness_field "$id" 6)"
+  n="$(printf '%s' "$models" | awk -F',' '{print NF}')"
+  case "$tier" in
+    mecanica) printf '%s' "$models" | awk -F',' '{print $NF}' ;;
+    critica)  printf '%s' "$models" | awk -F',' '{print $1}' ;;
+    *) if [ "$n" -ge 3 ]; then printf '%s' "$models" | awk -F',' '{print $2}'
+       else printf '%s' "$models" | awk -F',' '{print $1}'
+       fi ;;
+  esac
+}
+
+# nvo route "<tarefa>" — recomenda harness+modelo por heuristica de palavra-
+# chave, sem chamar modelo nenhum (tem que ser instantaneo e de graca).
+# Ordem de decisao, de cima para baixo, quem vier primeiro manda:
+#   1. so entram candidatos harness cujo binario esteja de fato instalado
+#      (cmd_harnesses ja distingue isso), menos os que a pessoa marcou para
+#      evitar (config avoid_harness);
+#   2. preferencia da pessoa (config prefer_build / prefer_review) vence a
+#      heuristica, se o harness preferido estiver instalado;
+#   3. senao, a forma da tarefa por palavra-chave decide o "tier" de custo
+#      (mecanica/construcao/critica) e, se for revisao/conferencia do
+#      trabalho de outro agente, tenta um harness DIFERENTE do que construiu
+#      (detect_builder_harness) — sem outro fornecedor instalado, cai para o
+#      mesmo fornecedor com um modelo diferente, e avisa a limitacao.
+# Ajuste a heuristica aqui: os casos de palavra-chave estao logo abaixo.
+cmd_route() {
+  [ $# -ge 1 ] || die 'uso: nvo route "<descricao da tarefa>"'
+  local tarefa="$*" low
+  low="$(printf '%s' "$tarefa" | tr '[:upper:]' '[:lower:]')"
+
+  local instalados=() id label inst models resto
+  while IFS=$'\t' read -r id label inst models resto; do
+    [ "$inst" = 1 ] && instalados+=("$id")
+  done < <(cmd_harnesses)
+
+  if [ "${#instalados[@]}" -eq 0 ]; then
+    echo "nvo: nenhum harness de agente instalado nesta maquina." >&2
+    echo "instale um deles para comecar:" >&2
+    awk -F'|' '/^[[:space:]]*#/{next} NF>=7{printf "  %s (%s): %s\n", $1, $2, $7}' "$HARNESSES" >&2
+    exit 1
+  fi
+
+  local avoid=",$(config_get avoid_harness ""),"
+  local x filtrados=()
+  for x in "${instalados[@]}"; do
+    case "$avoid" in *",$x,"*) continue ;; esac
+    filtrados+=("$x")
+  done
+  [ "${#filtrados[@]}" -gt 0 ] && instalados=("${filtrados[@]}")
+
+  local tier="construcao" is_review=0
+  case "$low" in *revis*|*confer*|*audit*) is_review=1; tier="critica" ;; esac
+  case "$low" in
+    *seguranca*|*segurança*|*arquitetura*|*critic*|*crític*|*"decisao critica"*|*"decisão crítica"*)
+      tier="critica" ;;
+  esac
+  case "$low" in
+    *documenta*|*texto*|*renomear*|*rename*|*typo*|*formata*|*traduz*|*mecanic*|*mecânic*)
+      [ "$tier" = "construcao" ] && tier="mecanica" ;;
+  esac
+
+  local builder=""
+  builder="$(detect_builder_harness "$low")" || builder=""
+
+  local pref_build pref_review
+  pref_build="$(config_get prefer_build "")"
+  pref_review="$(config_get prefer_review "")"
+  em_lista() { local alvo="$1" y; for y in "${instalados[@]}"; do [ "$y" = "$alvo" ] && return 0; done; return 1; }
+
+  local escolhido="" motivo=""
+  if [ "$is_review" = 1 ] && [ -n "$pref_review" ] && em_lista "$pref_review"; then
+    escolhido="$pref_review"
+    motivo="veio da sua configuracao (prefer_review), nao da heuristica"
+  elif [ "$is_review" != 1 ] && [ -n "$pref_build" ] && em_lista "$pref_build"; then
+    escolhido="$pref_build"
+    motivo="veio da sua configuracao (prefer_build), nao da heuristica"
+  elif [ "$is_review" = 1 ]; then
+    local outros=()
+    for x in "${instalados[@]}"; do [ "$x" != "$builder" ] && outros+=("$x"); done
+    if [ "${#outros[@]}" -gt 0 ]; then
+      escolhido="${outros[0]}"
+      motivo="revisao pede fornecedor diferente do que construiu${builder:+ ($builder)}, e modelo caro por ser julgamento critico"
+    elif [ "${#instalados[@]}" -eq 1 ]; then
+      escolhido="${instalados[0]}"
+      motivo="so ha '$escolhido' instalado — sem outro fornecedor para revisar, uso um modelo diferente do mesmo fornecedor"
+    else
+      escolhido="${instalados[0]}"
+      motivo="revisao pede fornecedor diferente, mas nao identifiquei quem construiu no texto — recomendando o harness padrao instalado"
+    fi
+  else
+    escolhido="${instalados[0]}"
+    case "$tier" in
+      mecanica) motivo="tarefa mecanica/textual: harness padrao instalado, modelo mais barato" ;;
+      critica)  motivo="julgamento critico/decisao de arquitetura: harness padrao instalado, modelo mais capaz" ;;
+      *)        motivo="construcao comum: harness padrao instalado, modelo intermediario" ;;
+    esac
+  fi
+
+  local modelo; modelo="$(route_pick_model "$escolhido" "$tier")"
+  echo "harness: $escolhido"
+  echo "modelo:  $modelo"
+  echo "porque:  $motivo"
+}
+
 die() { echo "nvo: $*" >&2; exit 1; }
 
 usage() {
@@ -172,6 +324,9 @@ nvo — orquestrador local de agentes Claude Code
   nvo explain <nome>           explica o diff em portugues simples (harness barato)
   nvo check <nome> [seg]       roda os testes do projeto na copia do agente
                                (nao bloqueia; so registra evidencia no .meta)
+  nvo review <nome>            encaminha para o revisor adversarial (bin/nvo-review.sh)
+  nvo route "<tarefa>"         recomenda harness e modelo pela forma da tarefa
+  nvo aprender "<licao>"       registra uma licao no aprendizado do projeto
   nvo collisions               avisa quais agentes vivos mexem no mesmo arquivo
   nvo status <nome>            situacao do check e colisoes em chave=valor
   nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
@@ -276,6 +431,34 @@ check_name() {
 wt_path()   { echo "$WT_ROOT/$PROJ/$1"; }
 meta_path() { echo "$META_ROOT/$PROJ/$1"; }
 note_path() { echo "$NOTES_ROOT/$PROJ/$1.md"; }
+aprendizado_path() { echo "$NOTES_ROOT/$PROJ/_aprendizado.md"; }
+
+# Memoria do projeto: um arquivo de licoes curtas por projeto, uma por linha,
+# injetado no prompt de todo agente novo (veja cmd_new). Cria com cabecalho na
+# primeira vez que alguem precisar dele.
+ensure_aprendizado() {
+  local f; f="$(aprendizado_path)"
+  [ -f "$f" ] && return 0
+  mkdir -p "$(dirname "$f")"
+  printf '# %s — aprendizado da equipe\n\nUma licao por linha, datada. Adicione com: nvo aprender "<licao>"\n\n' \
+    "$PROJ" > "$f"
+}
+
+# nvo aprender "<licao>" — acrescenta uma linha datada ao aprendizado do
+# projeto. Teto informativo (nao bloqueia): acima de ~40 linhas de licao,
+# avisa que esta na hora de podar, senao a memoria vira custo em todo agente.
+cmd_aprender() {
+  [ $# -eq 1 ] || die 'uso: nvo aprender "<licao>"'
+  load_project
+  ensure_aprendizado
+  local f n; f="$(aprendizado_path)"
+  printf '%s — %s\n' "$(date '+%Y-%m-%d')" "$1" >> "$f"
+  echo "registrado em $f"
+  n="$(grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2} — ' "$f" 2>/dev/null || true)"
+  [ -n "$n" ] || n=0
+  [ "$n" -gt 40 ] && echo "aviso: $n licoes registradas (acima de ~40) — considere podar as antigas/redundantes"
+  return 0
+}
 
 # Regra 7 do SPEC: worktree fora de ~/orquestra/worktrees e recusado.
 assert_wt_inside() {
@@ -323,6 +506,36 @@ cmd_init() {
   echo "$repo" > "$CONF"
   remember_project "$repo"
   echo "projeto ativo: $(basename "$repo") ($repo)"
+}
+
+# O app mostra a primeira linha do .prompt como resumo do card. Quando a
+# "tarefa" e so um ponteiro para um arquivo de briefing (padrao do maestro:
+# "...esta em <caminho>...", ou um caminho absoluto para .md citado na frase),
+# essa primeira linha vira o ponteiro cru, sem dizer nada do que o agente
+# faz. Aqui extraimos uma descricao humana lendo esse arquivo: o primeiro
+# titulo ("# ..."), tirando prefixos "Tarefa:" e "<nome-do-agente> —/-", ou a
+# primeira frase util se nao houver titulo. Se nada disso funcionar, devolve
+# a tarefa original sem alteracao nenhuma — nunca quebra o fluxo atual.
+extract_task_desc() {
+  local task="$1" name="$2" caminho titulo frase
+  caminho="$(printf '%s' "$task" \
+    | grep -oE '(esta|está) em [^[:space:]]+' | awk '{print $NF}' | head -1)"
+  [ -n "$caminho" ] \
+    || caminho="$(printf '%s' "$task" | grep -oE '/[^[:space:]]+\.md' | head -1)"
+  [ -n "$caminho" ] && [ -f "$caminho" ] || { printf '%s' "$task"; return 0; }
+
+  titulo="$(grep -m1 '^#' "$caminho" 2>/dev/null | sed -E 's/^#+[[:space:]]*//')"
+  if [ -n "$titulo" ]; then
+    titulo="$(printf '%s' "$titulo" | sed -E 's/^[Tt]arefa:[[:space:]]*//')"
+    [ -n "$name" ] && titulo="$(printf '%s' "$titulo" \
+      | sed -E "s/^${name}[[:space:]]*(—|-)[[:space:]]*//")"
+    [ -n "$titulo" ] && { printf '%s' "$titulo"; return 0; }
+  fi
+
+  frase="$(grep -m1 -E '[A-Za-z0-9À-ÿ]' "$caminho" 2>/dev/null | sed -E 's/^#+[[:space:]]*//')"
+  [ -n "$frase" ] && { printf '%s' "$frase"; return 0; }
+
+  printf '%s' "$task"
 }
 
 cmd_new() {
@@ -397,9 +610,11 @@ cmd_new() {
   mkdir -p "$WT_ROOT/$PROJ" "$NOTES_ROOT/$PROJ" "$META_ROOT/$PROJ"
   git -C "$REPO" worktree add -b "$branch" "$wt" "$base" >/dev/null
 
+  local task_desc; task_desc="$(extract_task_desc "$task" "$name")"
+
   meta="$(meta_path "$name")"
-  printf 'base=%s\ncli=%s\nmodel=%s\nparent=%s\ndepth=%s\n' \
-    "$base" "$cli" "$model" "$parent" "$depth" > "$meta.meta"
+  printf 'base=%s\ncli=%s\nmodel=%s\nparent=%s\ndepth=%s\ndesc=%s\n' \
+    "$base" "$cli" "$model" "$parent" "$depth" "$task_desc" > "$meta.meta"
 
   note="$(note_path "$name")"
   [ -f "$note" ] || printf '# %s — %s\n\n' "$PROJ" "$name" > "$note"
@@ -409,7 +624,14 @@ cmd_new() {
 
   # Prompt inicial via arquivo para evitar inferno de aspas no send-keys
   {
-    printf 'Tarefa: %s\n\n' "$task"
+    if [ "$task_desc" != "$task" ]; then
+      # a primeira linha vira a descricao curta (e o que o card do app mostra);
+      # a tarefa original (com o ponteiro) continua logo abaixo, senao o
+      # agente perde a instrucao de ir ler o arquivo de briefing.
+      printf 'Tarefa: %s\n\n%s\n\n' "$task_desc" "$task"
+    else
+      printf 'Tarefa: %s\n\n' "$task"
+    fi
     if [ "$plan" = 1 ]; then
       cat <<EOF
 PRIMEIRA ETAPA — PLANO, SEM ESCREVER CODIGO:
@@ -424,21 +646,36 @@ Quando receber a aprovacao, execute o plano que voce escreveu.
 
 EOF
     fi
+    local licoes
+    licoes="$(grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2} — ' "$(aprendizado_path)" 2>/dev/null || true)"
+    if [ -n "$licoes" ]; then
+      cat <<EOF
+O QUE A EQUIPE JA APRENDEU NESTE PROJETO (fatos do projeto, nao ordens novas):
+$licoes
+
+EOF
+    fi
     cat <<EOF
 Contexto e regras obrigatorias:
-- Voce esta em um git worktree isolado, na branch $branch. Trabalhe somente aqui.
-- Nao troque de branch, nao toque em main/master, nao faca git push.
-- Faca commits pequenos e frequentes na sua branch.
+- Voce esta em um git worktree isolado, na branch $branch: trabalhe so aqui,
+  sem trocar de branch, tocar em main/master ou dar git push. Comite pequeno
+  e frequente.
 - Escopo: entregue exatamente o que foi pedido, no tamanho que foi pedido. Nao
   adicione features, refatoracoes, abstracoes, nem tratamento de erro para
   cenarios que nao podem acontecer. Nao invente requisitos futuros.
 - Duvida que muda o resultado do trabalho: NAO adivinhe. Escreva a pergunta em
-  $note numa linha comecando com "BLOQUEADO:" e pare. Alguem responde e voce
-  continua de onde parou. Decisoes pequenas (nome de variavel, ordem dos
-  arquivos, formatacao) resolva voce mesmo e apenas registre nas notas.
+  $note numa linha comecando com "BLOQUEADO:" e pare. Decisoes pequenas (nome
+  de variavel, ordem dos arquivos, formatacao) resolva voce mesmo e registre.
 - Ao fim de cada etapa, registre progresso e decisoes em $note (secoes com
   data/hora). O orquestrador le essas notas em vez de ler sua tela.
-- Ao terminar a tarefa, escreva "STATUS: CONCLUIDO" na ultima secao das notas.
+- Antes de escrever "STATUS: CONCLUIDO", rode: nvo check $name
+  Se o resultado for ok ou sem_teste, registre na nota e conclua. Se falhar,
+  conserte e rode de novo; se nao conseguir consertar, escreva "STATUS:
+  BLOQUEADO" com o motivo, em vez de entregar quebrado.
+- Se descobrir algo que o PROXIMO agente precisaria saber e nao estava escrito
+  em lugar nenhum (convencao, armadilha, comando que so funciona de um jeito),
+  registre com: nvo aprender "<licao>". Nao registre o que sua tarefa fez
+  (isso e nota), opiniao, nem coisa obvia.
 EOF
     # Delegacao: so quem ainda tem camada abaixo recebe a ferramenta. Quem esta
     # no ultimo nivel precisa saber disso, senao tenta, falha e desperdica turno.
@@ -514,6 +751,15 @@ EOF
   done
 }
 
+# "concluido" so vale como PRONTO se o ultimo "nvo check" desse agente veio ok
+# ou sem_teste (sem_teste e legitimo: projeto sem comando de teste nao e culpa
+# do agente). Qualquer outra coisa (sem_dado, falhou, timeout) e "sem verificacao".
+check_is_verified() {
+  local status
+  status="$(sed -n 's/^check_status=//p' "$(meta_path "$1").meta" 2>/dev/null | tail -1)"
+  case "$status" in ok|sem_teste) return 0 ;; *) return 1 ;; esac
+}
+
 # status derivado das notas do agente — o marcador que aparece por ultimo manda
 agent_status() {
   local note last
@@ -523,7 +769,10 @@ agent_status() {
     | grep -oiE 'STATUS:[[:space:]]*CONCLU|STATUS:[[:space:]]*AGUARDANDO|BLOQUEADO|BLOQUEIO:' \
     | tail -1 | tr '[:lower:]' '[:upper:]')"
   case "$last" in
-    *CONCLU*)     echo concluido ;;
+    *CONCLU*)
+      if check_is_verified "$1"; then echo concluido_verificado
+      else echo concluido_sem_verificacao
+      fi ;;
     *AGUARDANDO*) echo aguardando ;;
     *BLOQUE*)     echo bloqueado ;;
     *)            echo trabalhando ;;
@@ -740,8 +989,8 @@ cmd_approve() {
 
 cmd_ls() {
   load_project
-  local dir name branch changes lines st badge
-  local n_done=0 n_wait=0 n_block=0 n_work=0 found=0
+  local dir name branch changes lines st badge desc
+  local n_done=0 n_done_nv=0 n_wait=0 n_block=0 n_work=0 found=0
   [ -d "$WT_ROOT/$PROJ" ] || { echo "nenhum agente ativo em $PROJ"; return 0; }
   for dir in "$WT_ROOT/$PROJ"/*/; do
     [ -d "$dir" ] || continue
@@ -751,12 +1000,15 @@ cmd_ls() {
     changes="$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
     st="$(agent_status "$name")"
     case "$st" in
-      concluido)   badge=$'\033[32m● CONCLUIDO\033[0m';         n_done=$((n_done+1)) ;;
+      concluido_verificado)     badge=$'\033[32m● CONCLUIDO (verificado)\033[0m';       n_done=$((n_done+1)) ;;
+      concluido_sem_verificacao) badge=$'\033[33m● CONCLUIDO (sem verificação)\033[0m'; n_done_nv=$((n_done_nv+1)) ;;
       aguardando)  badge=$'\033[36m● PLANO AGUARDANDO\033[0m';  n_wait=$((n_wait+1)) ;;
       bloqueado)   badge=$'\033[31m● BLOQUEADO\033[0m';         n_block=$((n_block+1)) ;;
       *)           badge=$'\033[2m● trabalhando\033[0m';        n_work=$((n_work+1)) ;;
     esac
     printf '== %s  %s  [%s, %s arq. alterados]\n' "$name" "$badge" "$branch" "$changes"
+    desc="$(sed -n 's/^desc=//p' "$(meta_path "$name").meta" 2>/dev/null | tail -1)"
+    [ -n "$desc" ] && printf '   tarefa: %s\n' "$desc"
     lines="$(tmux capture-pane -pt "$SESSION:$name" 2>/dev/null \
       | grep -v '^[[:space:]]*$' | tail -3 || true)"
     if [ -n "$lines" ]; then
@@ -770,9 +1022,10 @@ cmd_ls() {
     echo "nenhum agente ativo em $PROJ"
     return 0
   fi
-  printf 'resumo: %s concluido(s), %s plano(s) aguardando, %s bloqueado(s), %s trabalhando\n' \
-    "$n_done" "$n_wait" "$n_block" "$n_work"
+  printf 'resumo: %s concluido(s) verificado(s), %s concluido(s) sem verificacao, %s plano(s) aguardando, %s bloqueado(s), %s trabalhando\n' \
+    "$n_done" "$n_done_nv" "$n_wait" "$n_block" "$n_work"
   [ "$n_done" -gt 0 ] && echo "  → revise: nvo diff <nome>   aprove: nvo done <nome>"
+  [ "$n_done_nv" -gt 0 ] && echo "  → sem check ainda: nvo check <nome>   depois revise/aprove normalmente"
   [ "$n_wait" -gt 0 ] && echo "  → leia o plano: nvo note <nome>   libere: nvo approve <nome>"
   [ "$n_block" -gt 0 ] && echo "  → destrave: nvo note <nome>   responda: nvo send <nome> \"...\""
   [ -n "$(agent_collisions)" ] && echo "  → agentes mexendo no mesmo arquivo: nvo collisions"
@@ -1076,6 +1329,17 @@ cmd_check() {
   esac
 }
 
+# nvo review <nome> — so encaminha para o revisor adversarial (outro
+# fornecedor), sem implementar revisao nenhuma aqui. Mesmo nome, mesmo codigo
+# de saida do script.
+cmd_review() {
+  [ $# -eq 1 ] || die "uso: nvo review <nome>"
+  local script="$ORQ/bin/nvo-review.sh"
+  [ -f "$script" ] || die "revisor 'bin/nvo-review.sh' ainda nao existe"
+  [ -x "$script" ] || die "revisor 'bin/nvo-review.sh' sem permissao de execucao (chmod +x)"
+  exec "$script" "$1"
+}
+
 cmd_done() {
   local name="" confirm="" have_confirm=0
   while [ $# -gt 0 ]; do
@@ -1187,6 +1451,7 @@ cmd_status() {
   quando="$(sed -n 's/^check_time=//p' "$meta" 2>/dev/null | tail -1)"
   pares="$(agent_collisions)"
   colide="$(awk -F'\t' -v n="$name" '$1==n{print $2} $2==n{print $1}' <<<"$pares" | paste -sd, -)"
+  printf 'status=%s\n' "$(agent_status "$name")"
   printf 'check_status=%s\n' "${status:-sem_dado}"
   printf 'check_cmd=%s\n' "$cmd_"
   printf 'check_time=%s\n' "$quando"
@@ -1311,6 +1576,9 @@ case "${1:-}" in
   diff)   shift; cmd_diff "$@" ;;
   explain) shift; cmd_explain "$@" ;;
   check)  shift; cmd_check "$@" ;;
+  review) shift; cmd_review "$@" ;;
+  route)  shift; cmd_route "$@" ;;
+  aprender) shift; cmd_aprender "$@" ;;
   collisions) shift; cmd_collisions "$@" ;;
   status) shift; cmd_status "$@" ;;
   done)   shift; cmd_done "$@" ;;

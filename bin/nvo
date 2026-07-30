@@ -156,6 +156,7 @@ nvo — orquestrador local de agentes Claude Code
   nvo send <nome> "<texto>"    envia um prompt ao agente
   nvo note <nome>              imprime as notas do agente
   nvo diff <nome>              diff da branch do agente contra a base
+  nvo explain <nome>           explica o diff em portugues simples (harness barato)
   nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
   nvo kill <nome>              encerra janela e remove worktree SEM merge
   nvo attach                   entra na sessao tmux "orquestra"
@@ -614,15 +615,109 @@ get_base() {
 cmd_diff() {
   [ $# -eq 1 ] || die "uso: nvo diff <nome>"
   load_project
-  local name="$1" wt base
+  local name="$1" wt base mb behind
   agent_exists "$name" || die "agente '$name' nao existe"
   wt="$(wt_path "$name")"
   base="$(get_base "$name")"
   echo "== commits de agent/$name desde $base:"
   git -C "$wt" log --oneline "$base..HEAD" || true
   echo
-  # diff contra a base inclui tambem mudancas ainda nao commitadas
-  git -C "$wt" diff "$base"
+  # avisa se a base avancou desde que o agente nasceu, para o humano saber
+  # que pode haver conflito e que o diff abaixo ja ignora esses commits
+  mb="$(git -C "$wt" merge-base "$base" HEAD)"
+  behind="$(git -C "$wt" rev-list --count "$mb..$base")"
+  if [ "$behind" -gt 0 ]; then
+    echo "aviso: a base '$base' andou $behind commit(s) desde que este agente comecou"
+    echo
+  fi
+  # diff a partir do ponto de partida comum (merge-base), nao da ponta atual
+  # da base, senao commits novos da base aparecem como se o agente os tivesse
+  # apagado. A forma "base..." (tres pontos, sem lado direito) compara contra
+  # merge-base e ainda inclui mudancas nao commitadas no worktree.
+  git -C "$wt" diff "$base"...
+}
+
+# Escolhe harness+modelo baratos para "nvo explain": prefere claude com o
+# modelo haiku (se ambos estiverem no registro e instalados); senao cai para
+# o primeiro harness instalado, usando o ultimo modelo da lista dele —
+# convencao do harnesses.conf, onde o modelo mais leve vem por ultimo.
+# Imprime "binario<TAB>modelo" e retorna 1 se nada estiver instalado.
+pick_explain_harness() {
+  [ -f "$HARNESSES" ] || return 1
+  local hbin models
+  hbin="$(harness_field claude 3)"
+  models="$(harness_field claude 6)"
+  if [ -n "$hbin" ] && command -v "$hbin" >/dev/null 2>&1; then
+    case ",$models," in
+      *,haiku,*) printf '%s\t%s\n' "$hbin" "haiku"; return 0 ;;
+    esac
+  fi
+  local xid xbin xmodels model
+  while IFS='|' read -r xid _ xbin _ _ xmodels _; do
+    case "$xid" in ''|\#*) continue ;; esac
+    if command -v "$xbin" >/dev/null 2>&1; then
+      model="$(printf '%s' "$xmodels" | awk -F',' '{print $NF}')"
+      printf '%s\t%s\n' "$xbin" "$model"
+      return 0
+    fi
+  done < "$HARNESSES"
+  return 1
+}
+
+cmd_explain() {
+  [ $# -eq 1 ] || die "uso: nvo explain <nome>"
+  load_project
+  local name="$1" wt base note diff_text notes_text
+  agent_exists "$name" || die "agente '$name' nao existe"
+  wt="$(wt_path "$name")"
+  base="$(get_base "$name")"
+  note="$(note_path "$name")"
+
+  diff_text="$(git -C "$wt" diff "$base"...)"
+  [ -n "$diff_text" ] || die "sem diff: agente '$name' nao tem mudancas contra $base"
+
+  notes_text=""
+  [ -f "$note" ] && notes_text="$(cat "$note")"
+
+  # trunca o diff para nao gastar token a toa com harness caro
+  local max_chars=12000 truncated=0
+  if [ "${#diff_text}" -gt "$max_chars" ]; then
+    diff_text="${diff_text:0:$max_chars}"
+    truncated=1
+  fi
+
+  local pick hbin model
+  pick="$(pick_explain_harness)" \
+    || die "nenhum harness instalado para 'nvo explain' (veja bin/harnesses.conf)"
+  hbin="$(printf '%s' "$pick" | cut -f1)"
+  model="$(printf '%s' "$pick" | cut -f2)"
+
+  [ "$truncated" -eq 1 ] \
+    && echo "nvo: diff grande, truncado para $max_chars caracteres antes de enviar ao modelo"
+
+  local prompt
+  prompt="$(cat <<EOF
+Voce explica para um humano nao-tecnico o que um agente de codigo mudou.
+Responda em portugues simples, entre 6 e 10 linhas, texto corrido sem
+markdown pesado (sem titulos, sem blocos de codigo). Cubra, nesta ordem:
+1) o que mudou e em quais arquivos; 2) o risco de aplicar essa mudanca;
+3) o que vale testar a mao depois de aplicar; 4) o que as notas do agente
+prometem mas nao aparece no diff (se nada faltar, diga isso).
+
+=== NOTAS DO AGENTE ===
+${notes_text:-(sem notas)}
+
+=== DIFF (base...agente, pode estar truncado) ===
+$diff_text
+EOF
+)"
+
+  local output rc
+  output="$(printf '%s' "$prompt" | "$hbin" --model "$model" -p 2>&1)"
+  rc=$?
+  [ $rc -eq 0 ] && [ -n "$output" ] \
+    || die "chamada ao harness '$hbin' (modelo $model) falhou; nao foi possivel gerar a explicacao"
+  echo "$output"
 }
 
 cmd_done() {
@@ -833,6 +928,7 @@ case "${1:-}" in
   send)   shift; cmd_send "$@" ;;
   note)   shift; cmd_note "$@" ;;
   diff)   shift; cmd_diff "$@" ;;
+  explain) shift; cmd_explain "$@" ;;
   done)   shift; cmd_done "$@" ;;
   kill)   shift; cmd_kill "$@" ;;
   attach)  shift; cmd_attach "$@" ;;

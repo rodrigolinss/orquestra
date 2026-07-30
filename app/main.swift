@@ -972,6 +972,7 @@ final class Orchestra: ObservableObject {
                 self.agents = list
                 self.maestroPane = maestro
                 self.maestroRunning = running
+                if running { self.subindoMaestro = false }
                 if let antes = self.binarioAoAbrir, let agora = Orchestra.dataDoBinario(),
                    agora > antes, !self.versaoNovaNoDisco {
                     self.versaoNovaNoDisco = true
@@ -1034,7 +1035,17 @@ final class Orchestra: ObservableObject {
     }
 
     // nvo maestro abre o claude DENTRO do projeto, com o briefing de orquestrador
+    // Enquanto o maestro sobe, o botao precisa sair do caminho. Sem isso o
+    // segundo clique nao inicia nada: ele digita o comando DENTRO do chat do
+    // maestro que ja esta abrindo — foi o que encheu a caixa dele de linhas
+    // repetidas. A trava e por tempo porque o tmux so passa a reportar o
+    // processo novo alguns segundos depois de ele nascer.
+    @Published var subindoMaestro = false
+
     func startMaestro() {
+        guard !subindoMaestro, !maestroRunning else { return }
+        subindoMaestro = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { self.subindoMaestro = false }
         let model = maestroModel
         DispatchQueue.global().async {
             var args = ["maestro", "claude"]
@@ -1732,7 +1743,9 @@ struct MaestroNode: View {
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                     .help("qual modelo o maestro usa — os agentes dele você controla no “novo agente”, ou ele escolhe pela complexidade")
-                    SmallButton(label: "iniciar maestro", icon: "play.fill", tint: Theme.accent,
+                    SmallButton(label: orch.subindoMaestro ? "abrindo…" : "iniciar maestro",
+                                icon: "play.fill",
+                                tint: orch.subindoMaestro ? Theme.dim : Theme.accent,
                                 help: "abre o Claude Code na janela do maestro — é ele quem orquestra",
                                 prominent: true) {
                         orch.startMaestro()
@@ -4364,7 +4377,8 @@ struct ContentView: View {
                             StepCard(step: "2",
                                      title: "Inicie o maestro",
                                      detail: "O maestro é o agente chefe: você fala com ele em português e ele cria, acompanha e coordena os agentes que constroem de verdade.",
-                                     buttonLabel: "iniciar maestro", buttonIcon: "play.fill") {
+                                     buttonLabel: orch.subindoMaestro ? "abrindo…" : "iniciar maestro",
+                                     buttonIcon: "play.fill") {
                                 orch.startMaestro()
                             }
                             .frame(width: layout.maestroBox.w)

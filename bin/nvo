@@ -699,6 +699,17 @@ cmd_maestro() {
 
   load_project
   ensure_session
+
+  # Se ja ha um processo vivo na janela do maestro, mandar o comando de novo
+  # nao inicia nada: o texto cai DENTRO da conversa dele. Recusamos aqui para
+  # que nenhuma interface distraida consiga sujar o chat do maestro.
+  local atual
+  atual="$(tmux list-panes -t "$SESSION:maestro" -F '#{pane_current_command}' 2>/dev/null | head -1)"
+  case "$atual" in
+    ""|sh|bash|zsh|fish|dash|login|tmux) ;;
+    *) echo "o maestro ja esta rodando ($atual) — nada a fazer"; return 0 ;;
+  esac
+
   local brief="$META_ROOT/$PROJ.maestro.txt"
   mkdir -p "$META_ROOT"
   # o maestro tambem roda com o guard, no diretorio do projeto

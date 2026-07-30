@@ -1530,11 +1530,18 @@ struct PromptField: View {
             Image(systemName: "chevron.right").font(.system(size: Theme.uiSize(9), weight: .bold))
                 .foregroundColor(Theme.accent)
                 .padding(.bottom, 3)
-            // bloco de texto: cresce ate 5 linhas e depois rola por dentro —
-            // prompt bom raramente cabe numa linha so
+            // bloco de texto: cresce ate um teto de ~10 linhas e depois rola
+            // por dentro mostrando o fim do texto — prompt bom raramente cabe
+            // numa linha so, e um texto de varios paragrafos nao pode ficar
+            // escondido atras do fundo do card
             TextField(placeholder, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
-                .lineLimit(1...5)
+                .lineLimit(1...10)
+                .frame(maxHeight: 190)
+                // nunca deixa o card espremer o campo abaixo do que ele
+                // precisa: quem cede espaco e a area de conversa/terminal
+                // acima, que ja rola por conta propria
+                .layoutPriority(1)
                 .font(.system(size: Theme.uiSize(11), design: .monospaced))
                 .foregroundColor(Theme.text)
                 .onSubmit { submit() }
@@ -1795,11 +1802,16 @@ struct MaestroNode: View {
                         text: $draft, historyKey: "maestro", autoFocus: esperandoResposta) { t in
                 orch.sendMaestro(t)
             }
+            // quem cede espaco quando o card fica pequeno e a conversa acima,
+            // nao o campo de digitacao
+            .layoutPriority(1)
         }
         .padding(14)
         .frame(width: liveW, height: liveH, alignment: .topLeading)
-        .background(Theme.card)
-        .cornerRadius(12)
+        // arredonda so o fundo, nunca o conteudo: se o campo de prompt
+        // precisar de mais altura do que o card tem, ele aparece por cima
+        // em vez de ser cortado sem aviso
+        .background(Theme.card.cornerRadius(12))
         .overlay(RoundedRectangle(cornerRadius: 12)
             .stroke(active ? Theme.accent.opacity(0.7)
                            : esperandoResposta ? Theme.accent.opacity(0.9) : Theme.accent.opacity(0.35),
@@ -2737,6 +2749,9 @@ struct AgentNode: View {
                         text: $draft, historyKey: "agent") { t in
                 orch.sendAgent(agent.name, t)
             }
+            // quem cede espaco quando o card fica pequeno e a area de
+            // conversa/terminal acima, nao o campo de digitacao
+            .layoutPriority(1)
             if agent.status == .aguardando {
                 HStack(spacing: 6) {
                     Image(systemName: "list.clipboard").font(.system(size: Theme.uiSize(9)))
@@ -2774,8 +2789,10 @@ struct AgentNode: View {
         }
         .padding(12)
         .frame(width: liveW, height: liveH, alignment: .topLeading)
-        .background(Theme.card)
-        .cornerRadius(12)
+        // arredonda so o fundo, nunca o conteudo: se o campo de prompt
+        // precisar de mais altura do que o card tem, ele aparece por cima
+        // em vez de ser cortado sem aviso
+        .background(Theme.card.cornerRadius(12))
         .overlay(RoundedRectangle(cornerRadius: 12)
             .stroke(active ? Theme.accent.opacity(0.55) : Theme.cardBorder, lineWidth: 1))
         // punho de redimensionar, no canto inferior direito

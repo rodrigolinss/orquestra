@@ -305,6 +305,8 @@ final class Orchestra: ObservableObject {
     private var lastStatus: [String: AgentStatus] = [:]
     private var lastAllDone = false
     @Published var quadro: String = ""
+    @Published var limite: LimiteInfo?
+    private var avisouEsgotado = false
     private var timer: Timer?
     private var usageTimer: Timer?
 
@@ -324,6 +326,52 @@ final class Orchestra: ObservableObject {
     }
     private var lastPromptSig: [String: String] = [:]   // por janela: prompt ja avisado
     private var lastAutoAnswer: [String: Date] = [:]    // por assinatura: quando respondemos
+
+    // Estado da janela de uso do plano, lido dos avisos que o proprio Claude
+    // Code imprime no terminal ("used 95% of your session limit", "limit
+    // reached · resets 1:18am"). O trabalho para de verdade quando esgota:
+    // o painel precisa dizer isso, em vez de parecer que travou.
+    struct LimiteInfo: Equatable {
+        var pct: Int?
+        var esgotado: Bool
+        var reset: String?
+    }
+
+    static func detectarLimite(_ panes: [String]) -> LimiteInfo? {
+        var pct: Int?
+        var esgotado = false
+        var reset: String?
+
+        for pane in panes {
+            let baixo = pane.lowercased()
+
+            // "used 95% of your session limit"
+            if let r = baixo.range(of: "% of your session limit") ?? baixo.range(of: "% of your limit") {
+                let antes = baixo[baixo.startIndex..<r.lowerBound]
+                let digitos = String(antes.reversed().prefix(while: \.isNumber).reversed())
+                if let v = Int(digitos) { pct = max(pct ?? 0, v) }
+            }
+            // esgotado: variantes do aviso de limite atingido
+            for marca in ["limit reached", "reached your session limit",
+                          "reached your usage limit", "usage limit reached",
+                          "you've hit your limit", "limite atingido"] {
+                if baixo.contains(marca) { esgotado = true }
+            }
+            // "resets 1:18am" / "resets at 1:18am"
+            if reset == nil, let r = baixo.range(of: "resets") {
+                let depois = baixo[r.upperBound...]
+                    .drop(while: { $0 == " " })
+                    .drop(while: { $0 == "a" || $0 == "t" || $0 == " " })
+                let hora = String(depois.prefix(while: { $0.isNumber || $0 == ":" || $0 == "a"
+                                                       || $0 == "p" || $0 == "m" || $0 == "h" }))
+                if hora.contains(":") { reset = hora }
+            }
+        }
+        if pct == nil && !esgotado { return nil }
+        // 100% sem a frase explicita tambem conta como esgotado
+        if let p = pct, p >= 100 { esgotado = true }
+        return LimiteInfo(pct: pct, esgotado: esgotado, reset: reset)
+    }
 
     // "Purr" e o som mais discreto do sistema; o volume e da pessoa.
     // Instancia nova a cada toque: play() num som ainda tocando nao toca.
@@ -588,6 +636,20 @@ final class Orchestra: ObservableObject {
                 self.maestroPane = maestro
                 self.maestroRunning = running
                 self.quadro = quadro
+                // limite do plano: o aviso vem no terminal de quem esbarrou nele
+                var lim = Orchestra.detectarLimite([maestro] + list.map { $0.pane })
+                if lim?.reset == nil, let r = self.usage?.blockReset {
+                    lim?.reset = r
+                }
+                withAnimation(.easeInOut(duration: 0.35)) { self.limite = lim }
+                if lim?.esgotado == true, !self.avisouEsgotado {
+                    self.avisouEsgotado = true
+                    notifyMac("orquestra — sessão esgotada",
+                              lim?.reset.map { "a equipe pausou · volta às \($0)" }
+                                ?? "a equipe pausou até a janela de uso reabrir")
+                } else if lim?.esgotado != true {
+                    self.avisouEsgotado = false
+                }
                 // aviso sonoro / modo liberdade: maestro e todos os agentes
                 self.processarPrompt(janela: "maestro", pane: maestro)
                 for a in list { self.processarPrompt(janela: a.name, pane: a.pane) }
@@ -1186,6 +1248,12 @@ struct MaestroNode: View {
                     if let erro = openTerminal("tmux attach -t orquestra") { orch.lastError = erro }
                 }
             }
+            // aviso da janela de uso: discreto em uso normal, respirando quando
+            // esgota — para ficar claro que a equipe pausou, nao travou
+            if let lim = orch.limite {
+                AvisoLimite(limite: lim)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
             // o terminal absorve o espaco extra: maestro maior mostra mais tela
             TerminalText(content: orch.maestroPane.isEmpty
                          ? "o terminal do maestro aparece aqui quando você iniciar"
@@ -1386,6 +1454,63 @@ struct QuadroMarkdown: View {
                         .padding(.vertical, 3)
                     }
                 }
+            }
+        }
+    }
+}
+
+// Faixa de sessao esgotada: respira devagar para dizer "pausado, nao travado".
+// Aparece grande no maestro e como uma linha minima nos agentes.
+struct AvisoLimite: View {
+    let limite: Orchestra.LimiteInfo
+    var compacto = false
+    @State private var pulsa = false
+
+    private var cor: Color {
+        limite.esgotado ? Color(red: 1.0, green: 0.62, blue: 0.35) : Theme.dim
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: limite.esgotado ? "pause.circle.fill" : "gauge.medium")
+                .font(.system(size: Theme.uiSize(compacto ? 8 : 10)))
+                .foregroundColor(cor)
+                .opacity(limite.esgotado ? (pulsa ? 1.0 : 0.45) : 0.8)
+            if limite.esgotado {
+                Text(compacto ? "pausado" : "sessão esgotada — a equipe pausou")
+                    .font(.system(size: Theme.uiSize(compacto ? 8.5 : 10),
+                                  weight: .semibold))
+                    .foregroundColor(cor)
+                if let r = limite.reset {
+                    Text(compacto ? "até \(r)" : "· volta às \(r)")
+                        .font(.system(size: Theme.uiSize(compacto ? 8.5 : 10)))
+                        .foregroundColor(Theme.dim)
+                }
+            } else if let p = limite.pct {
+                Text("\(p)% da janela de uso")
+                    .font(.system(size: Theme.uiSize(10)))
+                    .foregroundColor(Theme.dim)
+                if let r = limite.reset {
+                    Text("· reseta \(r)").font(.system(size: Theme.uiSize(10)))
+                        .foregroundColor(Theme.dim.opacity(0.8))
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, compacto ? 6 : 8)
+        .padding(.vertical, compacto ? 3 : 5)
+        .background(limite.esgotado ? cor.opacity(pulsa ? 0.16 : 0.08)
+                                    : Color.white.opacity(0.04))
+        .cornerRadius(6)
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(limite.esgotado ? cor.opacity(0.35) : .clear, lineWidth: 1))
+        .help(limite.esgotado
+              ? "O limite de uso do plano foi atingido: os agentes param aqui e retomam quando a janela reabre. Nada foi perdido — worktrees, branches e notas continuam salvos."
+              : "quanto da janela de uso do plano já foi consumido")
+        .onAppear {
+            guard limite.esgotado else { return }
+            withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
+                pulsa = true
             }
         }
     }
@@ -1839,6 +1964,12 @@ struct AgentNode: View {
                 .help("o alvo é a tarefa que você pediu; a seta é a última anotação de progresso do agente")
             }
 
+            // nos agentes o aviso so aparece quando a sessao REALMENTE esgota:
+            // durante o uso normal nao ha nada para poluir o card
+            if let lim = orch.limite, lim.esgotado {
+                AvisoLimite(limite: lim, compacto: true)
+                    .transition(.opacity)
+            }
             // o terminal absorve o espaco extra: aumentar o card mostra mais tela
             TerminalText(content: agent.pane)
                 .frame(minHeight: 70, maxHeight: .infinity)

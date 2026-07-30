@@ -3577,6 +3577,7 @@ struct LimparSheet: View {
         .padding(18)
         .frame(width: 480)
         .background(Theme.bg)
+        .saidaSempre { dismiss() }
     }
 
     private func linha(_ icone: String, _ cor: Color, _ texto: String) -> some View {
@@ -3670,11 +3671,10 @@ struct DoneSheet: View {
             .layoutPriority(1)
         }
         .padding(18)
-        // Esc sempre fecha: se o layout escapar de novo, ainda ha saida.
-        .background(Button("") { dismiss() }.keyboardShortcut(.cancelAction).opacity(0))
         .frame(minWidth: 620, idealWidth: 760, maxWidth: 1000,
                minHeight: 420, idealHeight: 620, maxHeight: 820)
         .background(Theme.bg)
+        .saidaSempre { if !merging { dismiss() } }
         .onAppear { orch.diff(name) { diff = $0 } }
     }
 
@@ -3750,6 +3750,39 @@ struct StopSheet: View {
         .padding(18)
         .frame(width: 440)
         .background(Theme.bg)
+        .saidaSempre { dismiss() }
+        .saidaSempre { dismiss() }
+    }
+}
+
+// Botao de fechar que nao participa do layout: fica desenhado por cima, no
+// canto, e por isso nao tem como ser empurrado para fora da tela por um
+// conteudo grande. E a ultima saida de qualquer janela — ja aconteceu de um
+// diff longo levar o cabecalho embora e prender a pessoa.
+struct SaidaSempre: ViewModifier {
+    let fechar: () -> Void
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .topTrailing) {
+                Button(action: fechar) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: Theme.uiSize(16)))
+                        .foregroundColor(Theme.text.opacity(0.55))
+                        .padding(8)
+                        .background(Circle().fill(Theme.bg.opacity(0.9)))
+                }
+                .buttonStyle(.plain)
+                .help("fechar (Esc)")
+                .padding(6)
+            }
+            .background(Button("") { fechar() }.keyboardShortcut(.cancelAction).opacity(0))
+            .background(Button("") { fechar() }.keyboardShortcut("w", modifiers: .command).opacity(0))
+    }
+}
+
+extension View {
+    func saidaSempre(_ fechar: @escaping () -> Void) -> some View {
+        modifier(SaidaSempre(fechar: fechar))
     }
 }
 
@@ -3770,10 +3803,10 @@ struct TextSheet: View {
                 .layoutPriority(-1)
         }
         .padding(16)
-        .background(Button("") { dismiss() }.keyboardShortcut(.cancelAction).opacity(0))
         .frame(minWidth: 560, idealWidth: 720, maxWidth: 1000,
                minHeight: 380, idealHeight: 560, maxHeight: 800)
         .background(Theme.bg)
+        .saidaSempre { dismiss() }
     }
 }
 

@@ -1226,6 +1226,24 @@ final class Orchestra: ObservableObject {
         }
     }
 
+    // Esquecer a conversa sem derrubar o processo. E o botao mais economico do
+    // painel: o maestro acumula a sessao inteira e passa a pagar caro por
+    // reler tudo a cada mensagem. Notas, quadro e trabalho no disco ficam.
+    func limparConversa(_ janela: String) {
+        DispatchQueue.global().async {
+            let r = self.nvo(["clear", janela])
+            DispatchQueue.main.async {
+                if r.code == 0 {
+                    self.avisar("conversa de \(janela) limpa",
+                                "ele esqueceu o histórico e recomeça leve — as notas e o quadro continuam lá",
+                                icone: "eraser.fill", cor: Theme.accent)
+                } else {
+                    self.lastError = self.erroDe(r, "clear \(janela)")
+                }
+            }
+        }
+    }
+
     func isGitRepo(_ path: String) -> Bool {
         sh(GIT, ["-C", path, "rev-parse", "--git-dir"]).code == 0
     }
@@ -1756,6 +1774,12 @@ struct MaestroNode: View {
                                 help: "abre o Claude Code na janela do maestro — é ele quem orquestra",
                                 prominent: true) {
                         orch.startMaestro()
+                    }
+                }
+                if orch.maestroRunning {
+                    SmallButton(label: "limpar conversa", icon: "eraser",
+                                help: "o maestro esquece o histórico da conversa e recomeça leve — economiza bastante token. O quadro, as notas e o trabalho dos agentes continuam intactos") {
+                        orch.limparConversa("maestro")
                     }
                 }
                 SmallButton(label: "ver ao vivo", icon: "terminal",
@@ -2776,6 +2800,10 @@ struct AgentNode: View {
                 SmallButton(label: "diff", icon: "plus.forwardslash.minus",
                             help: "todas as mudanças de código que o agente fez, comparadas com o projeto original",
                             action: onDiff)
+                SmallButton(label: "limpar", icon: "eraser",
+                            help: "o agente esquece a conversa e recomeça leve, sem perder o trabalho já feito nem as notas — útil quando ele está enrolado ou gastando muito") {
+                    orch.limparConversa(agent.name)
+                }
                 Spacer()
                 SmallButton(label: "aprovar", icon: "checkmark.seal",
                             tint: AgentStatus.concluido.color,

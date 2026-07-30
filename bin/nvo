@@ -366,6 +366,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo projects                 lista os projetos ja usados e agentes vivos
   nvo religar [<nome>|--todos] recria a janela de quem perdeu o terminal e
                                manda o agente continuar de onde parou
+  nvo clear <maestro|nome>     limpa a conversa da janela (o processo continua;
+                               notas, quadro e trabalho no disco ficam)
   nvo stop [--forget-project]  encerra a sessao (maestro e agentes) preservando
                                worktrees, branches, notas e o projeto ativo
   nvo limpar [--descartar-agentes]
@@ -931,6 +933,25 @@ cmd_religar() {
   done
   [ "$ja" -eq 0 ] || echo "$ja ja estava(m) com janela viva, nao toquei"
   echo "$reaceso agente(s) religado(s)"
+}
+
+# Limpa a conversa de uma janela sem derrubar o processo: manda /clear para o
+# harness, que esquece o historico e recomeca com o contexto vazio. Serve para
+# o maestro principalmente — ele acumula sessao inteira de conversa e passa a
+# pagar caro por reler tudo a cada mensagem. As notas, o quadro e o trabalho no
+# disco nao sao tocados: o que se apaga e so a memoria da conversa.
+cmd_clear() {
+  [ $# -eq 1 ] || die "uso: nvo clear <maestro|nome-do-agente>"
+  local alvo="$1"
+  load_project
+  [ "$alvo" = "maestro" ] || check_name "$alvo"
+  tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qxF "$alvo" \
+    || die "'$alvo' nao tem janela aberta nesta sessao"
+  # C-u primeiro: se havia rascunho na caixa, o /clear iria como texto colado
+  tmux send-keys -t "$SESSION:$alvo" C-u
+  tmux send-keys -t "$SESSION:$alvo" -l "/clear"
+  tmux send-keys -t "$SESSION:$alvo" Enter
+  echo "conversa de '$alvo' limpa (notas, quadro e trabalho no disco intactos)"
 }
 
 cmd_maestro() {
@@ -1723,6 +1744,7 @@ case "${1:-}" in
   stop)    shift; cmd_stop "$@" ;;
   limpar)  shift; cmd_limpar "$@" ;;
   religar) shift; cmd_religar "$@" ;;
+  clear)   shift; cmd_clear "$@" ;;
   harnesses) shift; cmd_harnesses "$@" ;;
   config)  shift; cmd_config "$@" ;;
   approve) shift; cmd_approve "$@" ;;

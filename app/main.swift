@@ -1018,6 +1018,13 @@ final class Orchestra: ObservableObject {
                 // relancamento do app — uma lista vazia por instante (refresh
                 // falho, app reaberto) nao pode reabrir a porta pro reenvio.
                 let allDone = !list.isEmpty && list.allSatisfy { $0.status == .concluido }
+                // Liberdade quer dizer "concorda por mim": se voce ligou o modo,
+                // nao faz sentido continuar clicando aprovar um por um. O que
+                // conflita continua parando para voce decidir.
+                if allDone && running && self.autoYes && !self.aprovandoTodos {
+                    let prontos = list.filter { $0.status == .concluido }
+                    if !prontos.isEmpty { self.aprovarTodos() }
+                }
                 if allDone && running {
                     let assinatura = list.map { $0.name }.sorted().joined(separator: ",")
                     let chave = "avisoEquipeConcluida.\(proj ?? "")"
@@ -1288,6 +1295,35 @@ final class Orchestra: ObservableObject {
                 } else {
                     self.lastError = self.erroDe(r, "update")
                 }
+            }
+        }
+    }
+
+    // Aprovar em lote o que entra limpo. O que conflitaria fica para voce —
+    // merge com conflito no automatico e ajuda que atrapalha.
+    @Published var aprovandoTodos = false
+
+    func aprovarTodos() {
+        guard !aprovandoTodos else { return }
+        aprovandoTodos = true
+        DispatchQueue.global().async {
+            let r = self.nvo(["aprovar-todos"])
+            let saida = (r.out + r.err)
+            let aplicados = saida.components(separatedBy: "aplicado\n").count - 1
+            let ficaram = saida.components(separatedBy: "ficou para voce").count - 1
+            DispatchQueue.main.async {
+                self.aprovandoTodos = false
+                if r.code == 0 {
+                    var detalhe = "\(aplicados) aplicado(s) no projeto"
+                    if ficaram > 0 {
+                        detalhe += " · \(ficaram) ficou para você, porque conflita e precisa da sua decisão"
+                    }
+                    self.avisar("aprovação em lote", detalhe,
+                                icone: "checkmark.seal.fill", cor: AgentStatus.concluido.color)
+                } else {
+                    self.lastError = self.erroDe(r, "aprovar-todos")
+                }
+                self.refresh()
             }
         }
     }
@@ -3261,7 +3297,7 @@ struct AjustesView: View {
                                     Text("modo liberdade — concordar com tudo")
                                         .font(.system(size: Theme.uiSize(11), weight: .semibold))
                                         .foregroundColor(Theme.text)
-                                    Text("quando o maestro ou um agente pedir permissão no meio do trabalho, o orquestra responde “sim” sozinho. Isto NÃO aprova o trabalho pronto: aplicar no projeto continua sendo você, no botão “aprovar” do card. O firewall (guard.sh) continua bloqueando comandos destrutivos.")
+                                    Text("responde “sim” sozinho aos pedidos de permissão do maestro e dos agentes — e, quando a equipe inteira termina, aplica no projeto o que entra limpo, sem você clicar um por um. O que dá conflito para e espera a sua decisão. O firewall (guard.sh) continua bloqueando comandos destrutivos.")
                                         .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -4226,6 +4262,22 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .help("estes agentes perderam a janela do terminal (máquina dormiu, tmux caiu). O trabalho está salvo — religar traz cada um de volta para onde parou: \(orch.apagados.joined(separator: ", "))")
+                }
+                let prontosParaAprovar = orch.agents.filter { $0.status == .concluido }.count
+                if prontosParaAprovar > 1 || orch.aprovandoTodos {
+                    Button { orch.aprovarTodos() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "checkmark.seal.fill")
+                                .font(.system(size: Theme.uiSize(9)))
+                            Text(orch.aprovandoTodos ? "aplicando…" : "aprovar todos (\(prontosParaAprovar))")
+                                .font(.system(size: Theme.uiSize(9), weight: .semibold))
+                        }
+                        .foregroundColor(Theme.bg)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(AgentStatus.concluido.color).cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("aplica de uma vez todos os agentes concluídos que entram limpo. O que conflitar fica no painel esperando a sua decisão")
                 }
                 if orch.atualizacoes > 0 || orch.atualizando {
                     Button { orch.atualizar() } label: {

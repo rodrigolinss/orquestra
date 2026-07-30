@@ -175,6 +175,8 @@ nvo diff builder                      # revisa o trabalho contra a branch base
 nvo explain builder                   # resume o diff em português simples (harness barato)
 nvo check builder                     # roda os testes do projeto na cópia do agente
 nvo collisions                        # avisa quais agentes vivos mexem no mesmo arquivo
+nvo conflitos                         # simula o merge de cada um: entra limpo ou conflita
+nvo aprovar-todos                     # aplica todos os concluídos que entram limpo
 nvo status builder                    # situação do check e das colisões, em chave=valor
 nvo done builder                      # diff → nome digitado → merge --no-ff (alternativa ao clique no app)
 nvo kill reviewer                     # descarta sem merge (a branch é preservada)

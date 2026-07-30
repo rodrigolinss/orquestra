@@ -364,6 +364,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo route "<tarefa>"         recomenda harness e modelo pela forma da tarefa
   nvo aprender "<licao>"       registra uma licao no aprendizado do projeto
   nvo collisions               avisa quais agentes vivos mexem no mesmo arquivo
+  nvo conflitos                simula o merge de cada agente: entra limpo ou nao
+  nvo aprovar-todos            aplica todos os concluidos que entram limpo
   nvo status <nome>            situacao do check e colisoes em chave=valor
   nvo done <nome> [--salvar]   mostra diff, pede confirmacao, faz merge --no-ff
                                --salvar: commita o que o agente deixou solto
@@ -1111,6 +1113,105 @@ cmd_update() {
       || echo "   aviso: a recompilacao falhou; rode: bash $ORQ/app/build.sh"
   fi
   echo "os agentes em andamento nao foram tocados."
+}
+
+# Simula o merge de um agente sem aplicar nada, e diz se entra limpo. Dois
+# agentes no mesmo arquivo quase sempre convivem — o que decide e se as
+# mudancas se cruzam na mesma regiao. Perguntar isso ao git antes de aprovar
+# poupa o susto de descobrir no meio da aplicacao.
+# Imprime: "limpo", "conflito<TAB><arquivos>" ou "desconhecido".
+merge_preview() {
+  local name="$1" base branch saida
+  base="$(get_base "$name")"
+  branch="agent/$name"
+  git -C "$REPO" rev-parse --verify --quiet "$branch" >/dev/null || { echo "desconhecido"; return 0; }
+  # --write-tree existe do git 2.38 em diante; em versoes velhas nao arriscamos
+  # um palpite e dizemos que nao sabemos
+  saida="$(git -C "$REPO" merge-tree --write-tree --name-only "$base" "$branch" 2>/dev/null)" || {
+    if [ -n "$saida" ]; then
+      # formato do merge-tree em conflito: 1a linha e o oid da arvore, depois
+      # vem a lista de arquivos, uma linha em branco, e as mensagens do merge.
+      # So a lista de arquivos interessa.
+      printf 'conflito\t%s\n' \
+        "$(printf '%s\n' "$saida" | tail -n +2 | sed '/^$/q' | tr '\n' ' ' | sed 's/ *$//')"
+    else
+      echo "desconhecido"
+    fi
+    return 0
+  }
+  echo "limpo"
+}
+
+# nvo conflitos — para cada agente concluido, diz se aplicar agora entra limpo.
+cmd_conflitos() {
+  load_project
+  [ -d "$WT_ROOT/$PROJ" ] || { echo "nenhum agente ativo em $PROJ"; return 0; }
+  local dir name r tipo arqs
+  for dir in "$WT_ROOT/$PROJ"/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    r="$(merge_preview "$name")"
+    tipo="${r%%	*}"
+    arqs="${r#*	}"
+    case "$tipo" in
+      limpo)   printf '%-24s entra limpo\n' "$name" ;;
+      conflito) printf '%-24s CONFLITO em: %s\n' "$name" "$arqs" ;;
+      *)       printf '%-24s nao consegui prever (git antigo?)\n' "$name" ;;
+    esac
+  done
+}
+
+# Aprova em lote o que ja esta pronto E entra limpo. O que conflitaria fica
+# para a pessoa decidir — aplicar merge com conflito no automatico e o tipo de
+# ajuda que atrapalha. Sequencial de proposito: cada merge muda a base, entao
+# o teste do proximo tem de acontecer depois do anterior.
+cmd_aprovar_todos() {
+  local salvar=1
+  case "${1:-}" in
+    --sem-salvar) salvar=0 ;;
+    "") ;;
+    *) die "uso: nvo aprovar-todos [--sem-salvar]" ;;
+  esac
+  load_project
+  [ -d "$WT_ROOT/$PROJ" ] || { echo "nenhum agente ativo em $PROJ"; return 0; }
+
+  local dir name nota status aplicados=0 pulados=0 travados=""
+  for dir in "$WT_ROOT/$PROJ"/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    nota="$(cat "$(note_path "$name")" 2>/dev/null || true)"
+    status="$(printf '%s' "$nota" | grep -oE 'STATUS: *(CONCLUIDO|BLOQUEADO)' | tail -1)"
+    case "$status" in
+      *CONCLUIDO*) ;;
+      *) pulados=$((pulados+1)); continue ;;
+    esac
+
+    local prev tipo
+    prev="$(merge_preview "$name")"
+    tipo="${prev%%	*}"
+    if [ "$tipo" = "conflito" ]; then
+      echo "-> $name ficou para voce: conflita em ${prev#*	}"
+      travados="$travados $name"
+      continue
+    fi
+
+    if [ "$salvar" = 1 ]; then
+      cmd_done "$name" --salvar --confirm "$name" >/dev/null 2>&1
+    else
+      cmd_done "$name" --confirm "$name" >/dev/null 2>&1
+    fi
+    if [ $? -eq 0 ]; then
+      echo "-> $name aplicado"
+      aplicados=$((aplicados+1))
+    else
+      echo "-> $name falhou ao aplicar; revise com: nvo diff $name"
+      travados="$travados $name"
+    fi
+  done
+
+  echo
+  echo "$aplicados aplicado(s)$([ -n "$travados" ] && echo ", para voce:$travados")"
+  [ "$pulados" -eq 0 ] || echo "($pulados ainda nao concluido(s), nao toquei)"
 }
 
 cmd_maestro() {
@@ -1934,6 +2035,8 @@ case "${1:-}" in
   doctor)  shift; cmd_doctor "$@" ;;
   autoteste) shift; cmd_autoteste "$@" ;;
   update)  shift; cmd_update "$@" ;;
+  conflitos) shift; cmd_conflitos "$@" ;;
+  aprovar-todos) shift; cmd_aprovar_todos "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "comando desconhecido: $1 (veja nvo --help)" ;;

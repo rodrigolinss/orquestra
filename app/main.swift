@@ -804,18 +804,39 @@ struct PromptField: View {
     @State private var stash: String = ""      // o rascunho guardado antes de subir no historico
 
     private func submit() {
-        let t = text.trimmingCharacters(in: .whitespaces)
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
         if let k = historyKey { history = PromptHistory.append(k, t) }
         cursor = nil
         stash = ""
-        onSubmit(t)
+        // o tmux send-keys manda linha a linha; achatamos para o prompt chegar
+        // inteiro como uma instrucao so
+        onSubmit(t.replacingOccurrences(of: "\n", with: " "))
         text = ""
+    }
+
+    // Imagem da area de transferencia vira arquivo em ~/orquestra/attachments
+    // e o caminho entra no prompt — o agente le a imagem pelo caminho.
+    private func colarImagem() {
+        let pb = NSPasteboard.general
+        let png: Data? = pb.data(forType: .png)
+            ?? NSImage(pasteboard: pb)?.tiffRepresentation.flatMap {
+                NSBitmapImageRep(data: $0)?.representation(using: .png, properties: [:])
+            }
+        guard let data = png else { NSSound.beep(); return }
+        let dir = "\(ORQ)/attachments"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        let df = DateFormatter(); df.dateFormat = "yyyyMMdd-HHmmss"
+        let path = "\(dir)/colado-\(df.string(from: Date())).png"
+        guard (try? data.write(to: URL(fileURLWithPath: path))) != nil else { NSSound.beep(); return }
+        text += (text.isEmpty ? "" : " ") + path + " "
     }
 
     // ↑ caminha para tras no historico; ↓ volta e devolve o rascunho no fim
     private func recall(back: Bool) -> KeyPress.Result {
         guard historyKey != nil, !history.isEmpty else { return .ignored }
+        // num texto de varias linhas as setas sao do cursor, nao do historico
+        guard cursor != nil || !text.contains("\n") else { return .ignored }
         if back {
             let next: Int
             if let c = cursor {
@@ -841,18 +862,33 @@ struct PromptField: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(alignment: .bottom, spacing: 6) {
             Image(systemName: "chevron.right").font(.system(size: Theme.uiSize(9), weight: .bold))
                 .foregroundColor(Theme.accent)
-            TextField(placeholder, text: $text)
+                .padding(.bottom, 3)
+            // bloco de texto: cresce ate 5 linhas e depois rola por dentro —
+            // prompt bom raramente cabe numa linha so
+            TextField(placeholder, text: $text, axis: .vertical)
                 .textFieldStyle(.plain)
+                .lineLimit(1...5)
                 .font(.system(size: Theme.uiSize(11), design: .monospaced))
                 .foregroundColor(Theme.text)
                 .onSubmit { submit() }
                 .onKeyPress(.upArrow) { recall(back: true) }
                 .onKeyPress(.downArrow) { recall(back: false) }
+                .onPasteCommand(of: [.png, .tiff, .image]) { _ in colarImagem() }
                 .onAppear { if let k = historyKey { history = PromptHistory.load(k) } }
-            if !text.trimmingCharacters(in: .whitespaces).isEmpty {
+            // anexo por clique: cobre o caso do ⌘V nao chegar ate nos quando o
+            // campo ja esta em edicao
+            Button(action: colarImagem) {
+                Image(systemName: "paperclip")
+                    .font(.system(size: Theme.uiSize(10)))
+                    .foregroundColor(Theme.dim)
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 2)
+            .help("cola a imagem da área de transferência (print de tela, por exemplo): ela vira um arquivo e o caminho entra no prompt para o agente ler")
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button(action: submit) {
                     HStack(spacing: 3) {
                         Text(submitLabel).font(.system(size: Theme.uiSize(9), weight: .semibold))
@@ -864,6 +900,7 @@ struct PromptField: View {
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
+                .padding(.bottom, 1)
                 .help("enviar (ou tecle Enter)")
             }
         }
@@ -1101,7 +1138,9 @@ final class AgentLayout: ObservableObject {
     static let shared = AgentLayout()
     // v3: o maestro entrou no canvas e as vagas mudaram de geometria; a chave
     // nova descarta posicoes salvas no esquema antigo, que ficariam sobrepostas
-    private static let key = "ui.agentBoxes.v3"
+    // v4: cartoes de passo entraram no canvas e o maestro ganhou folga no topo;
+    // a chave nova descarta posicoes salvas durante os testes da geometria antiga
+    private static let key = "ui.agentBoxes.v4"
 
     struct Box: Equatable {
         var x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat
@@ -1120,11 +1159,11 @@ final class AgentLayout: ObservableObject {
     // "@" nao e valido em nome de agente, entao a chave nunca colide
     static let maestroKey = "@maestro"
     // x = (1076 - 760) / 2: maestro centrado sobre o cluster de 3 colunas
-    static let maestroDefault = Box(x: 158, y: 0, w: 760, h: 470)
+    // y=76 deixa espaco para o cartao de passo que fica ancorado acima dele
+    static let maestroDefault = Box(x: 158, y: 76, w: 760, h: 470)
     static let maestroMinW: CGFloat = 480
     static let maestroMinH: CGFloat = 300
     // as vagas dos agentes comecam abaixo do maestro, com folga para os cabos
-    private static let agentsTop: CGFloat = maestroDefault.y + maestroDefault.h + 96
 
     @Published private(set) var boxes: [String: Box] = [:]
 
@@ -1146,12 +1185,16 @@ final class AgentLayout: ObservableObject {
         UserDefaults.standard.set(raw, forKey: Self.key)
     }
 
-    // vaga natural: fileiras de 3 abaixo do maestro, na ordem dos agentes,
-    // deslocadas pela origem centralizada
+    // vaga natural: fileiras de 3 ALINHADAS sob a posicao ATUAL do maestro —
+    // agente novo nasce arrumado embaixo dele, onde quer que ele esteja,
+    // nunca em cima de outro card. Mover um card o torna absoluto (livre).
     func slot(_ index: Int) -> Box {
+        let m = maestroBox
+        let clusterW = CGFloat(Self.cols) * Self.defW + CGFloat(Self.cols - 1) * Self.gap
+        let left = max(0, m.x + m.w / 2 - clusterW / 2)
         let col = index % Self.cols, row = index / Self.cols
-        return Box(x: originX + CGFloat(col) * (Self.defW + Self.gap),
-                   y: Self.agentsTop + CGFloat(row) * (Self.defH + Self.gap),
+        return Box(x: left + CGFloat(col) * (Self.defW + Self.gap),
+                   y: m.y + m.h + 96 + CGFloat(row) * (Self.defH + Self.gap),
                    w: Self.defW, h: Self.defH)
     }
 
@@ -1751,6 +1794,27 @@ struct AjustesView: View {
                             .foregroundColor(Theme.dim)
                     }
                 }
+
+                // assinatura da marca, como no topo do painel
+                HStack {
+                    Spacer()
+                    Button {
+                        NSWorkspace.shared.open(URL(string:
+                            "https://nevoaai.com/?utm_source=orquestra&utm_medium=app_ajustes&utm_campaign=opensource_orchestrator")!)
+                    } label: {
+                        Text("powered by nevoaai.com")
+                            .font(.system(size: Theme.uiSize(9), weight: .medium, design: .monospaced))
+                            .foregroundColor(Theme.nevoa.opacity(0.9))
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .overlay(Capsule().stroke(Theme.nevoa.opacity(0.35), lineWidth: 0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { inside in
+                        if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
+                    Spacer()
+                }
+                .padding(.top, 8)
             }
             .padding(28)
             .frame(maxWidth: 720, alignment: .leading)
@@ -2554,28 +2618,35 @@ struct ContentView: View {
             GeometryReader { viewport in
             ScrollView([.vertical, .horizontal]) {
                 VStack(alignment: .leading, spacing: 40) {
-                    // onboarding: o proximo passo sempre visivel
-                    if orch.project == nil {
-                        StepCard(step: "1",
-                                 title: "Escolha o projeto",
-                                 detail: "Uma pasta do seu Mac ou um repositório do GitHub. Os agentes só trabalham dentro dele, cada um numa cópia isolada — seus arquivos ficam intactos até você aprovar.",
-                                 buttonLabel: "escolher projeto", buttonIcon: "folder") {
-                            showInit = true
-                        }
-                    } else if !orch.maestroRunning {
-                        StepCard(step: "2",
-                                 title: "Inicie o maestro",
-                                 detail: "O maestro é o agente chefe: você fala com ele em português e ele cria, acompanha e coordena os agentes que constroem de verdade.",
-                                 buttonLabel: "iniciar maestro", buttonIcon: "play.fill") {
-                            orch.startMaestro()
-                        }
-                    }
                     // canvas livre com origem fixa no canto superior esquerdo:
                     // nada e centralizado, entao arrastar um card nunca desloca
                     // os outros. Maestro e agentes vivem no mesmo plano.
                     let canvas = layout.canvasSize(names: orch.agents.map { $0.name })
                     ZStack(alignment: .topLeading) {
                         MaestroNode(orch: orch)
+                        // o cartao de passo ACOMPANHA o maestro: fica ancorado
+                        // logo acima dele, onde quer que ele esteja
+                        if orch.project == nil {
+                            StepCard(step: "1",
+                                     title: "Escolha o projeto",
+                                     detail: "Uma pasta do seu Mac ou um repositório do GitHub. Os agentes só trabalham dentro dele, cada um numa cópia isolada — seus arquivos ficam intactos até você aprovar.",
+                                     buttonLabel: "escolher projeto", buttonIcon: "folder") {
+                                showInit = true
+                            }
+                            .frame(width: layout.maestroBox.w)
+                            .position(x: layout.maestroBox.x + layout.maestroBox.w / 2,
+                                      y: max(30, layout.maestroBox.y - 38))
+                        } else if !orch.maestroRunning {
+                            StepCard(step: "2",
+                                     title: "Inicie o maestro",
+                                     detail: "O maestro é o agente chefe: você fala com ele em português e ele cria, acompanha e coordena os agentes que constroem de verdade.",
+                                     buttonLabel: "iniciar maestro", buttonIcon: "play.fill") {
+                                orch.startMaestro()
+                            }
+                            .frame(width: layout.maestroBox.w)
+                            .position(x: layout.maestroBox.x + layout.maestroBox.w / 2,
+                                      y: max(30, layout.maestroBox.y - 38))
+                        }
                         ForEach(Array(orch.agents.enumerated()), id: \.element.id) { idx, a in
                             AgentNode(orch: orch, agent: a, index: idx,
                                 onNotes: { sheet = SheetTarget(name: a.name, kind: .notes) },

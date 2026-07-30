@@ -724,6 +724,23 @@ criar subagentes (camada 2) quando a tarefa render divisao de verdade — cada
 camada custa contexto. Limite: $NVO_MAX_DEPTH camadas, $NVO_MAX_FANOUT filhos por agente,
 $NVO_MAX_AGENTS agentes vivos.
 
+ECONOMIA — leia como regra, nao como conselho:
+Esta maquina tem $(ram_gb) GB de RAM e cada agente e um Claude Code inteiro.
+O dinheiro e real e a memoria acaba antes do dinheiro. Portanto:
+1. NAO fique reverificando estado. Se voce ja leu as notas e nada mudou, nao
+   leia de novo "para conferir": voce paga token por cada releitura e nao
+   descobre nada. Espere o humano falar ou um agente concluir.
+2. NAO rode 'nvo ls', 'git log' ou 'nvo note' em laco. Uma leitura por
+   mudanca real, nao uma por minuto de espera.
+3. Crie o MENOR numero de agentes que resolve. Dois agentes bons valem mais
+   que seis se atropelando — e seis nesta maquina derrubam a sessao.
+4. Prefira sonnet nos agentes. So peca opus quando a tarefa for de arquitetura
+   ou analise profunda, e diga por que ao criar.
+5. Antes de criar um agente novo, pergunte-se se um dos vivos nao resolve
+   aquilo com mais uma instrucao. Instrucao e barata; agente novo nao e.
+6. Nao escreva relatorio no chat. O quadro e curto de proposito; o resto vai
+   nas notas dos agentes, que voce nao precisa repetir.
+
 HARNESSES DISPONIVEIS NESTA MAQUINA (a CLI que roda cada agente), escolha por
 tarefa — so os listados abaixo estao instalados:
 $harness_list

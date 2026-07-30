@@ -495,6 +495,13 @@ final class Orchestra: ObservableObject {
     // quando cada agente apareceu: agente de vida curta nasce e morre dentro
     // de um teste automatico, e anunciar a saida dele so assusta a toa
     private var nascimentos: [String: Date] = [:]
+    // A branch de um agente nunca muda, e a contagem de arquivos mexidos muda
+    // devagar. Rodar dois comandos git por agente a cada ciclo era o grosso do
+    // peso do painel numa maquina pequena: com 12 agentes davam 24 processos
+    // a cada dois segundos, so para reconfirmar o que ja se sabia.
+    private var cacheBranch: [String: String] = [:]
+    private var cacheMudancas: [String: Int] = [:]
+    private var ciclo = 0
     private var primeiroCiclo = true
 
     func avisar(_ titulo: String, _ detalhe: String, icone: String, cor: Color) {
@@ -692,7 +699,7 @@ final class Orchestra: ObservableObject {
         refreshConfig()
         refresh()
         refreshUsage()
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.refresh()
         }
         usageTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
@@ -793,6 +800,7 @@ final class Orchestra: ObservableObject {
     func refresh() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            self.ciclo &+= 1
             var repo = self.pinned
             if repo == nil, Orchestra.abertos.isEmpty {
                 // app recem-aberto: retoma o ultimo projeto e se fixa nele
@@ -816,10 +824,22 @@ final class Orchestra: ObservableObject {
                     let wt = "\(wtRoot)/\(name)"
                     var isDir: ObjCBool = false
                     guard FileManager.default.fileExists(atPath: wt, isDirectory: &isDir), isDir.boolValue else { continue }
-                    let branch = sh(GIT, ["-C", wt, "branch", "--show-current"]).out
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    let changes = sh(GIT, ["-C", wt, "status", "--porcelain"]).out
-                        .split(separator: "\n").count
+                    let branch: String
+                    if let b = self.cacheBranch[name] {
+                        branch = b
+                    } else {
+                        branch = sh(GIT, ["-C", wt, "branch", "--show-current"]).out
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        self.cacheBranch[name] = branch
+                    }
+                    let changes: Int
+                    if self.ciclo % 4 == 0 || self.cacheMudancas[name] == nil {
+                        changes = sh(GIT, ["-C", wt, "status", "--porcelain"]).out
+                            .split(separator: "\n").count
+                        self.cacheMudancas[name] = changes
+                    } else {
+                        changes = self.cacheMudancas[name] ?? 0
+                    }
                     let note = (try? String(contentsOfFile: "\(ORQ)/notes/\(proj)/\(name).md", encoding: .utf8)) ?? ""
                     // mesma logica do nvo: o marcador que aparece por ultimo manda
                     let status = Orchestra.statusFromNote(note)
@@ -858,7 +878,7 @@ final class Orchestra: ObservableObject {
             // histórico do tmux e um teto folgado de linhas guardado no
             // modelo (Orchestra), não na view — a view é recriada ao trocar
             // de aba, o conteúdo capturado aqui sobrevive a isso.
-            let maestro = self.pane("maestro", lines: 400, historico: 2000) ?? ""
+            let maestro = self.pane("maestro", lines: 400, historico: 600) ?? ""
             let running = self.windowBusy("maestro")
             // quadro do maestro para o humano: linguagem simples, vira card
             let quadro = proj.flatMap {
@@ -903,6 +923,8 @@ final class Orchestra: ObservableObject {
                         }
                         self.lastStatus[ido] = nil
                         self.nascimentos[ido] = nil
+                        self.cacheBranch[ido] = nil
+                        self.cacheMudancas[ido] = nil
                     }
                     // varios de uma vez viram UM aviso: tres cartoes iguais
                     // empilhados leem como catastrofe, e catastrofe nao e

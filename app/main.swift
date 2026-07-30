@@ -1252,6 +1252,142 @@ struct MaestroNode: View {
     }
 }
 
+// Markdown renderizado do quadro. O AttributedString do SwiftUI cobre
+// negrito/italico/codigo inline; titulos, listas e TABELAS precisam de
+// layout, entao tratamos linha a linha e montamos as tabelas em grade.
+struct QuadroMarkdown: View {
+    let texto: String
+
+    private enum Bloco: Identifiable {
+        case titulo(String, Int)
+        case paragrafo(String)
+        case item(String)
+        case tabela([[String]])
+        case regua
+        var id: String { UUID().uuidString }
+    }
+
+    private static func inline(_ s: String) -> AttributedString {
+        (try? AttributedString(markdown: s,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(s)
+    }
+
+    private static func celulas(_ linha: String) -> [String] {
+        linha.trimmingCharacters(in: CharacterSet(charactersIn: " |"))
+            .components(separatedBy: "|")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    // linha separadora de tabela: |---|:--:|---|
+    private static func eSeparador(_ l: String) -> Bool {
+        let t = l.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("|") else { return false }
+        return t.allSatisfy { "|-: ".contains($0) } && t.contains("-")
+    }
+
+    private func blocos() -> [Bloco] {
+        var out: [Bloco] = []
+        var tabela: [[String]] = []
+        func fechaTabela() {
+            if !tabela.isEmpty { out.append(.tabela(tabela)); tabela = [] }
+        }
+        for raw in texto.components(separatedBy: "\n") {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix("|") {
+                if Self.eSeparador(l) { continue }   // separador nao vira linha
+                tabela.append(Self.celulas(l))
+                continue
+            }
+            fechaTabela()
+            if l.isEmpty { continue }
+            if l.hasPrefix("---") || l.hasPrefix("***") { out.append(.regua); continue }
+            if l.hasPrefix("#") {
+                let nivel = l.prefix(while: { $0 == "#" }).count
+                out.append(.titulo(String(l.dropFirst(nivel)).trimmingCharacters(in: .whitespaces),
+                                   min(nivel, 3)))
+                continue
+            }
+            if l.hasPrefix("- ") || l.hasPrefix("* ") || l.hasPrefix("+ ") {
+                out.append(.item(String(l.dropFirst(2))))
+                continue
+            }
+            if let p = l.firstIndex(of: "."), l[l.startIndex..<p].allSatisfy(\.isNumber),
+               l.distance(from: l.startIndex, to: p) <= 2 {
+                out.append(.item(String(l[l.index(after: p)...]).trimmingCharacters(in: .whitespaces)))
+                continue
+            }
+            out.append(.paragrafo(l))
+        }
+        fechaTabela()
+        return out
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(blocos()) { b in
+                switch b {
+                case .titulo(let t, let n):
+                    Text(Self.inline(t))
+                        .font(.system(size: Theme.uiSize(n == 1 ? 13 : n == 2 ? 12 : 11),
+                                      weight: n <= 2 ? .bold : .semibold))
+                        .foregroundColor(n == 1 ? Theme.accent : Theme.text)
+                        .padding(.top, n <= 2 ? 4 : 2)
+                case .paragrafo(let t):
+                    Text(Self.inline(t))
+                        .font(.system(size: Theme.uiSize(11)))
+                        .foregroundColor(Theme.text.opacity(0.92))
+                        .lineSpacing(2.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .item(let t):
+                    HStack(alignment: .top, spacing: 6) {
+                        Text("•").font(.system(size: Theme.uiSize(11)))
+                            .foregroundColor(Theme.accent.opacity(0.7))
+                        Text(Self.inline(t))
+                            .font(.system(size: Theme.uiSize(11)))
+                            .foregroundColor(Theme.text.opacity(0.92))
+                            .lineSpacing(2.5)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.leading, 2)
+                case .regua:
+                    Divider().background(Theme.cardBorder)
+                case .tabela(let linhas):
+                    let cols = linhas.map(\.count).max() ?? 0
+                    if cols > 0 {
+                        VStack(spacing: 0) {
+                            ForEach(Array(linhas.enumerated()), id: \.offset) { i, linha in
+                                HStack(alignment: .top, spacing: 0) {
+                                    ForEach(0..<cols, id: \.self) { c in
+                                        Text(Self.inline(c < linha.count ? linha[c] : ""))
+                                            .font(.system(size: Theme.uiSize(10),
+                                                          weight: i == 0 ? .semibold : .regular))
+                                            .foregroundColor(i == 0 ? Theme.text : Theme.text.opacity(0.88))
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .padding(.horizontal, 7).padding(.vertical, 5)
+                                        if c < cols - 1 {
+                                            Rectangle().fill(Theme.cardBorder).frame(width: 1)
+                                        }
+                                    }
+                                }
+                                .background(i == 0 ? Color.white.opacity(0.06)
+                                                   : (i % 2 == 0 ? Color.white.opacity(0.02) : .clear))
+                                if i < linhas.count - 1 {
+                                    Rectangle().fill(Theme.cardBorder).frame(height: 1)
+                                }
+                            }
+                        }
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.cardBorder))
+                        .cornerRadius(6)
+                        .padding(.vertical, 3)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Quadro de status: o cartao onde o maestro conta, em linguagem humana, o
 // que a equipe fez, o que mudou e o que espera decisao. Movel e
 // redimensionavel como os outros nos do canvas.
@@ -1302,16 +1438,15 @@ struct BoardNode: View {
                 Spacer()
             }
             .help("resumo em linguagem simples do que a equipe fez, o que mudou e o que espera sua decisão — atualizado pelo maestro")
+            // fundo cinza claro: separa na hora o que e resumo humano do
+            // maestro do que e saida bruta de terminal dos agentes
             ScrollView {
-                Text(orch.quadro)
-                    .font(.system(size: Theme.uiSize(11)))
-                    .foregroundColor(Theme.text.opacity(0.9))
-                    .lineSpacing(3)
+                QuadroMarkdown(texto: orch.quadro)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
+                    .padding(12)
             }
-            .background(Theme.terminalBg.opacity(0.6))
+            .background(Color(red: 0.20, green: 0.20, blue: 0.215))
             .cornerRadius(8)
         }
         .padding(12)

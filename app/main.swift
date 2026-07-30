@@ -672,8 +672,8 @@ final class Orchestra: ObservableObject {
         return false
     }
 
-    func pane(_ window: String, lines: Int = 40) -> String? {
-        let r = sh(TMUX, ["capture-pane", "-pt", "\(session):\(window)", "-S", "-200"])
+    func pane(_ window: String, lines: Int = 40, historico: Int = 200) -> String? {
+        let r = sh(TMUX, ["capture-pane", "-pt", "\(session):\(window)", "-S", "-\(historico)"])
         guard r.code == 0 else { return nil }
         let all = r.out.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -736,7 +736,11 @@ final class Orchestra: ObservableObject {
                                           parent: parent, depth: depth))
                 }
             }
-            let maestro = self.pane("maestro", lines: 40) ?? ""
+            // conversa do maestro precisa de fôlego para rolar pra trás: mais
+            // histórico do tmux e um teto folgado de linhas guardado no
+            // modelo (Orchestra), não na view — a view é recriada ao trocar
+            // de aba, o conteúdo capturado aqui sobrevive a isso.
+            let maestro = self.pane("maestro", lines: 400, historico: 2000) ?? ""
             let running = self.windowBusy("maestro")
             // quadro do maestro para o humano: linguagem simples, vira card
             let quadro = proj.flatMap {
@@ -1205,11 +1209,14 @@ struct PromptField: View {
     @Binding var text: String
     var submitLabel: String = "enviar"
     var historyKey: String? = nil
+    // quando o maestro esta esperando resposta, o foco vem sozinho pro campo
+    var autoFocus: Bool = false
     let onSubmit: (String) -> Void
 
     @State private var history: [String] = []
     @State private var cursor: Int? = nil      // nil = escrevendo algo novo
     @State private var stash: String = ""      // o rascunho guardado antes de subir no historico
+    @FocusState private var focado: Bool
 
     private func submit() {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1285,7 +1292,12 @@ struct PromptField: View {
                 .onKeyPress(.upArrow) { recall(back: true) }
                 .onKeyPress(.downArrow) { recall(back: false) }
                 .onPasteCommand(of: [.png, .tiff, .image]) { _ in colarImagem() }
-                .onAppear { if let k = historyKey { history = PromptHistory.load(k) } }
+                .focused($focado)
+                .onAppear {
+                    if let k = historyKey { history = PromptHistory.load(k) }
+                    if autoFocus { focado = true }
+                }
+                .onChange(of: autoFocus) { if $0 { focado = true } }
             // anexo por clique: cobre o caso do ⌘V nao chegar ate nos quando o
             // campo ja esta em edicao
             Button(action: colarImagem) {
@@ -1391,6 +1403,27 @@ struct MaestroNode: View {
     private var liveH: CGFloat { box.h }
     private var active: Bool { dragging || resizing }
 
+    // marca combinada: o maestro escreve essa linha quando precisa de uma
+    // decisao em texto da pessoa. Pega a ultima ocorrencia — e a pergunta atual.
+    private var perguntaPendente: String? {
+        for raw in orch.maestroPane.components(separatedBy: "\n").reversed() {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            if l.hasPrefix(MarcaPergunta.prefixo) {
+                return l.dropFirst(MarcaPergunta.prefixo.count).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        return nil
+    }
+
+    // reserva para quando a marca nao aparece: maestro ja foi iniciado e o
+    // processo em primeiro plano voltou a ser um shell (parado, esperando
+    // entrada) — nao confundir com "ainda nao iniciado"
+    private var aguardandoPorHeuristica: Bool {
+        orch.maestroRunning == false && !orch.maestroPane.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var esperandoResposta: Bool { perguntaPendente != nil || aguardandoPorHeuristica }
+
     private let examples: [(String, String)] = [
         ("👷 criar equipe", "cria um agente builder pra implementar [descreva a funcionalidade] e um agente reviewer pra auditar o trabalho dele. Me avisa quando os dois terminarem."),
         ("📋 ver progresso", "o que os agentes estão fazendo? Lê as notas de cada um e me dá um resumo curto."),
@@ -1472,16 +1505,19 @@ struct MaestroNode: View {
                     if let erro = openTerminal("tmux attach -t \(orch.session)") { orch.lastError = erro }
                 }
             }
+            // estado inequivoco: nada de adivinhar se o maestro esta esperando
+            if esperandoResposta {
+                EsperandoResposta(pergunta: perguntaPendente)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
             // aviso da janela de uso: discreto em uso normal, respirando quando
             // esgota — para ficar claro que a equipe pausou, nao travou
             if let lim = orch.limite {
                 AvisoLimite(limite: lim)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            // o terminal absorve o espaco extra: maestro maior mostra mais tela
-            TerminalText(content: orch.maestroPane.isEmpty
-                         ? "o terminal do maestro aparece aqui quando você iniciar"
-                         : orch.maestroPane, size: 11)
+            // conversa legivel: separa pessoa/maestro em vez de terminal cru
+            ConversaMaestro(content: orch.maestroPane)
                 .frame(minHeight: 120, maxHeight: .infinity)
             if orch.maestroRunning {
                 TerminalKeys(window: "maestro", pane: orch.maestroPane, orch: orch)
@@ -1505,7 +1541,7 @@ struct MaestroNode: View {
                 }
             }
             PromptField(placeholder: "escreva em português o que você quer que a equipe faça…",
-                        text: $draft, historyKey: "maestro") { t in
+                        text: $draft, historyKey: "maestro", autoFocus: esperandoResposta) { t in
                 orch.sendMaestro(t)
             }
         }
@@ -1514,7 +1550,9 @@ struct MaestroNode: View {
         .background(Theme.card)
         .cornerRadius(12)
         .overlay(RoundedRectangle(cornerRadius: 12)
-            .stroke(active ? Theme.accent.opacity(0.7) : Theme.accent.opacity(0.35), lineWidth: 1))
+            .stroke(active ? Theme.accent.opacity(0.7)
+                           : esperandoResposta ? Theme.accent.opacity(0.9) : Theme.accent.opacity(0.35),
+                    lineWidth: !active && esperandoResposta ? 2 : 1))
         .overlay(alignment: .bottomTrailing) {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
                 .font(.system(size: Theme.uiSize(8), weight: .bold))
@@ -1680,6 +1718,128 @@ struct QuadroMarkdown: View {
                 }
             }
         }
+    }
+}
+
+// A marca combinada entre agentes: quando o maestro precisa de uma decisão em
+// texto, ele escreve uma linha começando com isso, seguida da pergunta.
+enum MarcaPergunta {
+    static let prefixo = "PRECISO DE VOCÊ:"
+}
+
+// Conversa legível do maestro: separa o que a pessoa escreveu (linha que
+// começa com ❯ ou >) do que o maestro respondeu, e reaproveita o
+// QuadroMarkdown para dar títulos/listas/respiro ao texto do maestro — em vez
+// de jogar tudo junto, monoespaçado e branco, como um terminal cru.
+struct ConversaMaestro: View {
+    let content: String
+
+    private enum Turno: Identifiable {
+        case pessoa(String)
+        case maestro(String)
+        var id: String { UUID().uuidString }
+    }
+
+    private static func ehLinhaDaPessoa(_ l: String) -> Bool {
+        l.hasPrefix("❯") || l.hasPrefix("> ") || l == ">"
+    }
+
+    private static func turnos(_ texto: String) -> [Turno] {
+        var out: [Turno] = []
+        var atual: [String] = []
+        var atualEhPessoa = false
+        func fecha() {
+            let bloco = atual.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            atual = []
+            guard !bloco.isEmpty else { return }
+            out.append(atualEhPessoa ? .pessoa(bloco) : .maestro(bloco))
+        }
+        for raw in texto.components(separatedBy: "\n") {
+            let l = raw.trimmingCharacters(in: .whitespaces)
+            // a pergunta já ganha destaque próprio fora do terminal — não
+            // repete aqui dentro do fluxo da conversa
+            if l.hasPrefix(MarcaPergunta.prefixo) { continue }
+            let ehPessoa = Self.ehLinhaDaPessoa(l)
+            if ehPessoa != atualEhPessoa { fecha() }
+            atualEhPessoa = ehPessoa
+            atual.append(ehPessoa ? String(l.drop(while: { $0 == "❯" || $0 == ">" || $0 == " " })) : raw)
+        }
+        fecha()
+        return out
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("a conversa com o maestro aparece aqui quando você iniciar")
+                            .font(.system(size: Theme.uiSize(11)))
+                            .foregroundColor(Theme.dim)
+                    } else {
+                        ForEach(Self.turnos(content)) { turno in
+                            switch turno {
+                            case .pessoa(let texto):
+                                HStack(alignment: .top, spacing: 6) {
+                                    Text("❯").font(.system(size: Theme.uiSize(11), weight: .bold))
+                                        .foregroundColor(Theme.accent)
+                                    Text(texto)
+                                        .font(.system(size: Theme.uiSize(11), weight: .semibold))
+                                        .foregroundColor(Theme.text)
+                                        .lineSpacing(2.5)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                }
+                            case .maestro(let texto):
+                                QuadroMarkdown(texto: texto)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    Color.clear.frame(height: 1).id("fim-conversa")
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // rola pro fim so quando a view aparece (troca de aba, abrir de
+            // novo): nao a cada atualizacao, senao a pessoa nunca consegue
+            // ficar lendo o que rolou pra tras
+            .onAppear { proxy.scrollTo("fim-conversa") }
+        }
+        .background(Theme.terminalBg)
+        .cornerRadius(6)
+    }
+}
+
+// Faixa inequívoca: aparece quando o maestro parou de falar e está esperando
+// uma resposta em texto da pessoa — nunca deixa isso implícito.
+struct EsperandoResposta: View {
+    let pergunta: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "questionmark.circle.fill")
+                .font(.system(size: Theme.uiSize(13)))
+                .foregroundColor(Theme.accent)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("o maestro está esperando sua resposta")
+                    .font(.system(size: Theme.uiSize(11), weight: .bold))
+                    .foregroundColor(Theme.accent)
+                if let pergunta, !pergunta.isEmpty {
+                    Text(pergunta)
+                        .font(.system(size: Theme.uiSize(11)))
+                        .foregroundColor(Theme.text.opacity(0.92))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(Theme.accent.opacity(0.12))
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.accent.opacity(0.45), lineWidth: 1))
     }
 }
 
@@ -2158,6 +2318,19 @@ struct AgentNode: View {
                     .font(.system(size: Theme.uiSize(9), design: .monospaced))
                     .foregroundColor(Theme.dim)
                     .help("arquivos modificados no espaço isolado deste agente")
+                // atalho pra "descartar" sempre visivel no cabecalho: a acao
+                // ja existia la embaixo, mas sumia de vista em card pequeno
+                // ou redimensionado — aqui e a primeira coisa que se ve
+                Button(action: onKill) {
+                    Image(systemName: "trash")
+                        .font(.system(size: Theme.uiSize(10)))
+                        .foregroundColor(Theme.dim)
+                        .padding(5)
+                        .background(Color.white.opacity(0.05))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("descartar \(agent.name): encerra o agente sem aplicar nada no projeto — o trabalho não é perdido, fica guardado numa branch")
             }
             HStack(spacing: 5) {
                 Text("\(agent.branch)  ·  \(agent.cli)\(agent.model.isEmpty ? "" : " · \(agent.model)")")

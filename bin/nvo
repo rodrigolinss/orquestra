@@ -378,6 +378,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo config [<chave> <valor>] le ou ajusta os limites da equipe
                                (max_depth, max_fanout, max_agents)
   nvo doctor                   diagnostica o ambiente (deps, login, hook)
+  nvo autoteste                prova o fluxo inteiro (criar, ler, aprovar, limpar)
+                               num repo temporario, sem gastar token
   nvo usage [--json]           consumo de tokens: sessao 5h, dia, modelos
 EOF
 }
@@ -952,6 +954,84 @@ cmd_clear() {
   tmux send-keys -t "$SESSION:$alvo" -l "/clear"
   tmux send-keys -t "$SESSION:$alvo" Enter
   echo "conversa de '$alvo' limpa (notas, quadro e trabalho no disco intactos)"
+}
+
+# Prova que a instalacao funciona nesta maquina, do clone ao merge, sem gastar
+# um token: usa "bash" como harness de mentira no lugar do Claude. Roda num
+# repositorio temporario, num socket tmux proprio, e limpa tudo no fim — nao
+# encosta na sua sessao nem no seu projeto. E o jeito de saber se o Windows
+# (ou qualquer Linux) esta de fato inteiro, em vez de descobrir no meio de um
+# trabalho de verdade.
+cmd_autoteste() {
+  # globais de proposito: o trap de saida roda depois que a funcao termina, e
+  # nao enxergaria variaveis locais
+  local passos=0 falhas=0
+  AUTOTESTE_SOCK="autoteste-$$"
+  AUTOTESTE_TMP="$(mktemp -d 2>/dev/null || mktemp -d -t orqteste)"
+  local sock="$AUTOTESTE_SOCK" tmp="$AUTOTESTE_TMP"
+
+  passo() { # passo <descricao> <comando...>
+    local desc="$1"; shift
+    passos=$((passos+1))
+    if "$@" >/dev/null 2>&1; then
+      printf '  \033[32m✓\033[0m %s\n' "$desc"
+    else
+      falhas=$((falhas+1))
+      printf '  \033[31m✗\033[0m %s\n' "$desc"
+      printf '      → repita para ver o erro: %s\n' "$*"
+    fi
+  }
+
+  limpar_tudo() {
+    [ -n "${AUTOTESTE_TMP:-}" ] || return 0
+    NVO_TMUX_SOCKET="$AUTOTESTE_SOCK" NVO_PROJECT="$AUTOTESTE_TMP/projeto" \
+      "$0" limpar --descartar-agentes >/dev/null 2>&1 || true
+    command tmux -L "$AUTOTESTE_SOCK" kill-server >/dev/null 2>&1 || true
+    rm -rf "$AUTOTESTE_TMP" "$WT_ROOT/projeto" "$NOTES_ROOT/projeto" "$META_ROOT/projeto"
+    AUTOTESTE_TMP=""
+  }
+  trap limpar_tudo EXIT
+
+  echo "nvo autoteste — provando o fluxo completo sem gastar token"
+  echo "  (repositorio temporario, sessao tmux propria; sua sessao nao e tocada)"
+  echo
+
+  mkdir -p "$tmp/projeto"
+  passo "criar um repositorio git de teste" \
+    env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    sh -c "cd '$tmp/projeto' && git init -q -b main && echo teste > a.txt && git add -A && git commit -qm inicial"
+
+  # daqui pra frente tudo roda isolado: projeto e socket proprios
+  passo "tmux abre uma sessao"        env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" ls
+  passo "criar um agente (worktree + branch + janela)" \
+    env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" NVO_AGENT_CMD=bash "$0" new prova "tarefa de teste" bash
+  passo "listar agentes"              env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" ls
+  passo "ler a tela do agente"        env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" read prova 5
+  passo "enviar instrucao"            env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" send prova "oi"
+  passo "ler as notas"                env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" note prova
+  passo "ver o diff"                  env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" diff prova
+  passo "religar apos queda"          env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" religar prova
+
+  # trabalho de verdade na copia isolada, para o merge ter conteudo
+  passo "o agente commita na copia isolada dele" \
+    env GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    sh -c "cd '$WT_ROOT/projeto/prova' && echo feito > b.txt && git add -A && git commit -qm 'trabalho do agente'"
+
+  passo "aprovar (merge no projeto)" \
+    env NVO_TMUX_SOCKET="$sock" NVO_PROJECT="$tmp/projeto" "$0" done prova --confirm prova
+  passo "o arquivo do agente chegou no projeto" test -f "$tmp/projeto/b.txt"
+  passo "o firewall bloqueia comando destrutivo" \
+    sh -c "printf '{\"tool_input\":{\"command\":\"rm -rf /\"}}' | '$ORQ/bin/guard.sh' 2>/dev/null; [ \$? -eq 2 ]"
+
+  echo
+  if [ "$falhas" -eq 0 ]; then
+    printf '\033[32mtudo funcionou\033[0m: %d de %d passos.\n' "$passos" "$passos"
+    echo "esta maquina esta pronta — pode usar com um projeto de verdade."
+  else
+    printf '\033[31m%d de %d passos falharam.\033[0m\n' "$falhas" "$passos"
+    echo "rode 'nvo doctor' primeiro; se ele estiver ok, abra uma issue com a saida acima."
+  fi
+  [ "$falhas" -eq 0 ]
 }
 
 cmd_maestro() {
@@ -1769,6 +1849,7 @@ case "${1:-}" in
   approve) shift; cmd_approve "$@" ;;
   projects) shift; cmd_projects "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
+  autoteste) shift; cmd_autoteste "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "comando desconhecido: $1 (veja nvo --help)" ;;

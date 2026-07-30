@@ -134,7 +134,31 @@ source ~/.bashrc      # ou abra um terminal novo
 nvo doctor            # deve terminar com "pronto para orquestrar."
 ```
 
-#### 6. Onde deixar os seus projetos
+#### 6. Provar que ficou tudo funcionando
+
+Antes de usar num projeto de verdade, rode:
+
+```bash
+nvo autoteste
+```
+
+Ele executa o fluxo inteiro — cria um repositório temporário, cria um agente, lê a tela dele, envia instrução, mostra o diff, religa depois de uma queda simulada, aprova com merge e confere que o firewall bloqueia comando destrutivo. Usa um harness de mentira (`bash`) no lugar do Claude, então **não gasta um token**, roda numa sessão tmux separada e apaga tudo no fim: sua sessão e seus projetos não são tocados.
+
+```
+nvo autoteste — provando o fluxo completo sem gastar token
+
+  ✓ criar um repositorio git de teste
+  ✓ criar um agente (worktree + branch + janela)
+  ✓ religar apos queda
+  ✓ aprovar (merge no projeto)
+  ✓ o firewall bloqueia comando destrutivo
+
+tudo funcionou: 13 de 13 passos.
+```
+
+Se algum passo falhar, ele mostra o comando exato para você repetir e ver o erro.
+
+#### 7. Onde deixar os seus projetos
 
 **Deixe os projetos dentro do Linux (`~/projetos/...`), não em `/mnt/c/...`.** O Orquestra cria uma cópia de trabalho isolada por agente (git worktree), e no disco do Windows visto pelo WSL isso fica lento a ponto de atrapalhar, além de embaralhar permissões de arquivo.
 
@@ -148,7 +172,7 @@ nvo init ~/projetos/<seu-repo>
 
 Para abrir esses arquivos no VS Code do Windows, use a extensão **WSL** e o comando `code .` de dentro do Ubuntu — ele abre a janela do Windows editando os arquivos do Linux, sem a perda de desempenho.
 
-#### 7. O dia a dia sem o app
+#### 8. O dia a dia sem o app
 
 ```bash
 nvo maestro                          # o chefe: fale com ele em português
@@ -228,6 +252,7 @@ nvo projects                          # projetos já usados e quantos agentes vi
 nvo limpar                            # recomeço: maestro novo, quadro em branco, notas arquivadas
 nvo stop                              # encerra a sessão, preservando o trabalho
 nvo doctor                            # diagnóstico do ambiente
+nvo autoteste                         # prova o fluxo inteiro sem gastar token
 nvo usage                             # consumo de tokens: janela de 5h, dia, modelos
 ```
 

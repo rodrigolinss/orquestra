@@ -32,14 +32,32 @@ case "$ORQ_OS" in
   *)     echo "aviso: plataforma nao reconhecida ($(uname -s)); seguindo como Linux" ;;
 esac
 
-# 3. dependencias (so instala o que falta)
-if [ "$ORQ_PKG" = "none" ]; then
+# 3. dependencias (so instala o que falta, e so pede sudo se for instalar)
+FALTANDO=""
+for pkg in tmux jq; do
+  command -v "$pkg" >/dev/null 2>&1 || FALTANDO="$FALTANDO $pkg"
+done
+FALTANDO="${FALTANDO# }"
+
+if [ -z "$FALTANDO" ]; then
+  echo "-> tmux e jq ja instalados"
+elif [ "$ORQ_PKG" = "none" ]; then
   echo "aviso: nenhum gerenciador de pacotes conhecido — instale tmux e jq manualmente"
 else
-  [ "$ORQ_PKG" = "apt" ] && command -v tmux >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 \
-    || { [ "$ORQ_PKG" = "apt" ] && sudo apt-get update -qq || true; }
-  for pkg in tmux jq; do
-    command -v "$pkg" >/dev/null 2>&1 && continue
+  # Pedir a senha do nada assusta, e no WSL confunde de verdade: a senha e a do
+  # Linux que voce criou quando o Ubuntu abriu pela primeira vez, nao a do
+  # Windows nem a da sua conta Microsoft. Dizemos isso ANTES de o prompt subir.
+  echo "-> falta instalar:$FALTANDO"
+  case "$ORQ_PKG" in
+    apt|dnf|pacman)
+      echo "   isso usa 'sudo', entao o sistema vai pedir a sua senha."
+      [ "$ORQ_OS" = "wsl" ] \
+        && echo "   no WSL e a SENHA DO LINUX (a que voce criou quando o Ubuntu abriu" \
+        && echo "   pela primeira vez) — nao e a senha do Windows."
+      [ "$ORQ_PKG" = "apt" ] && sudo apt-get update -qq || true
+      ;;
+  esac
+  for pkg in $FALTANDO; do
     echo "-> instalando $pkg ($ORQ_PKG)"
     orq_pkg_install "$pkg" || echo "   aviso: falhou; rode manualmente: $(orq_pkg_hint "$pkg")"
   done

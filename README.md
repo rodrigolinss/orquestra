@@ -27,7 +27,7 @@
 
 ---
 
-O Orquestra transforma sua máquina em um time de engenharia de IA supervisionado. Um agente **maestro** recebe suas instruções em linguagem natural e recruta agentes trabalhadores — cada um trancado dentro do próprio git worktree e da própria branch, vigiado por um firewall determinístico de comandos, e integrado de volta **apenas** com a sua aprovação explícita, digitada.
+O Orquestra transforma sua máquina em um time de engenharia de IA supervisionado. Um agente **maestro** recebe suas instruções em linguagem natural e recruta agentes trabalhadores — cada um trancado dentro do próprio git worktree e da própria branch, vigiado por um firewall determinístico de comandos, e integrado de volta **apenas** com a sua aprovação explícita.
 
 Sem ficar copiando e colando entre terminais. Sem nenhum agente encostando na sua branch principal. Sem momentos "ops".
 
@@ -50,7 +50,7 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 |---|---|---|
 | 🗂 | **O isolamento mora no sistema de arquivos, não no prompt** | Cada agente só enxerga o próprio worktree. Um agente confuso não consegue quebrar o trabalho de outro — nem a sua branch principal. |
 | 🛡 | **Barreiras determinísticas** | Um hook `PreToolUse` bloqueia comandos destrutivos *antes* que eles rodem. Não depende do modelo estar num dia bom. |
-| ✍️ | **Integrar é decisão humana** | O `nvo done` mostra o diff completo e exige que você digite o nome do agente. Não existe merge automático. Nunca. |
+| ✍️ | **Integrar é decisão humana** | No app, aprovar é um clique deliberado em "aplicar no projeto" no card do agente, sempre com o diff visível. No terminal, `nvo done` pede o nome exato do agente. Não existe merge automático. Nunca. |
 
 ## Recursos
 
@@ -129,11 +129,11 @@ Abra o **Orquestra** (Spotlight → "Orquestra"). Escolha um projeto — uma pas
 
 > *"cria um agente builder pra implementar o webhook de pagamento do docs/webhook.md, e um reviewer pra auditar. Me avisa quando os dois terminarem."*
 
-Cada agente aparece como um card ao vivo conectado ao maestro: status, saída do terminal, campo de prompt direto, notas e diff. Quando um agente termina ou trava, o macOS te notifica.
+Cada agente aparece como um card ao vivo conectado ao maestro: status, saída do terminal, campo de prompt direto, notas e diff. Quando um agente termina ou trava, o macOS te notifica. Aprovar é um clique no próprio card — ver o diff e apertar "aplicar no projeto"; o merge acontece ali, sem precisar abrir o terminal.
 
 ### A CLI
 
-Tudo o que o app faz, de forma scriptável:
+A aprovação padrão é o clique no app; a CLI cobre isso e o resto, de forma scriptável — útil no Linux/WSL2, ou para quem prefere terminal:
 
 ```bash
 nvo init ~/projetos/minha-api         # registra o projeto ativo
@@ -147,7 +147,11 @@ nvo read builder 60                   # espia a tela de um agente, sem interferi
 nvo send builder "prioriza o retry"   # envia um prompt
 nvo note builder                      # lê as notas de progresso dele
 nvo diff builder                      # revisa o trabalho contra a branch base
-nvo done builder                      # diff → confirmação digitada → merge --no-ff
+nvo explain builder                   # resume o diff em português simples (harness barato)
+nvo check builder                     # roda os testes do projeto na cópia do agente
+nvo collisions                        # avisa quais agentes vivos mexem no mesmo arquivo
+nvo status builder                    # situação do check e das colisões, em chave=valor
+nvo done builder                      # diff → nome digitado → merge --no-ff (alternativa ao clique no app)
 nvo kill reviewer                     # descarta sem merge (a branch é preservada)
 nvo attach                            # acompanha tudo ao vivo no tmux
 nvo stop                              # encerra a sessão, preservando o trabalho
@@ -185,7 +189,7 @@ O Orquestra parte do princípio de que os agentes *vão* se comportar mal em alg
 |---|---|
 | **Isolamento por worktree** | Agentes nunca rodam na branch principal. Worktrees fora de `~/orquestra/worktrees` são rejeitados. |
 | **Firewall de comandos** (`guard.sh`) | Bloqueia antes da execução: `rm -rf` em caminhos absolutos/home, `sudo`, `git push`, `git reset --hard`, checkout/switch para main/master, pipes `curl\|sh`, `chmod 777`, e qualquer acesso a `.env*`, `*.pem`, `id_rsa`, `~/.ssh`, `~/.aws`. |
-| **Merge com trava humana** | O `nvo done` exige digitar o nome exato do agente para aplicar — na CLI ou no diálogo do app, sempre com o diff à vista. Não existe merge de um clique. |
+| **Merge com trava humana** | A aprovação vive no app: card do agente → diff → clique deliberado em "aplicar no projeto". Quem prefere terminal usa `nvo done`, que exige digitar o nome exato do agente. Nunca há merge sem o diff visível primeiro. |
 | **Permissões padrão** | Os prompts de permissão dos agentes nunca são contornados. `--dangerously-skip-permissions` não é usado em lugar nenhum do código. |
 
 O hook do firewall é distribuído automaticamente para todo worktree (como `.claude/settings.local.json`, ignorado pelo git), então os agentes carregam suas barreiras junto.

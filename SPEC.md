@@ -17,12 +17,26 @@ nvo read <nome> [n]          tmux capture-pane, sem interromper o agente
 nvo send <nome> "<texto>"    tmux send-keys, envia prompt ao agente
 nvo note <nome>              imprime notes/<projeto>/<nome>.md
 nvo diff <nome>              git diff da branch do agente contra a base
-nvo done <nome>              mostra o diff, exige confirmacao digitando o
-                             nome, so entao faz merge --no-ff e remove
-                             o worktree
-        [--confirm <nome>]   recebe a confirmacao por argumento, para que uma
-                             interface grafica colete o nome digitado; o valor
-                             tem de bater com o nome do agente
+nvo explain <nome>           resume o diff e as notas em portugues simples,
+                             via harness barato (ex.: haiku)
+nvo check <nome> [segundos]  roda o comando de teste do projeto (detectado ou
+                             config.conf 'verify') dentro do worktree do
+                             agente; nunca bloqueia aprovacao, so registra
+                             evidencia no .meta
+nvo collisions               lista pares de agentes vivos que alteraram o
+                             mesmo arquivo; aviso, nunca bloqueio
+nvo status <nome>            saida chave=valor com o resultado do ultimo
+                             check e as colisoes do agente, para a interface
+                             grafica consumir
+nvo done <nome>              mostra o diff, exige confirmacao, so entao faz
+                             merge --no-ff e remove o worktree. Caminho
+                             padrao: o app, com um clique em "aplicar no
+                             projeto" no card do agente. Alternativa: o
+                             terminal, digitando o nome do agente.
+        [--confirm <nome>]   recebe a confirmacao por argumento, para que a
+                             interface grafica do app passe o nome sozinha
+                             apos o clique; o valor tem de bater com o nome
+                             do agente
 nvo kill <nome>              encerra a janela e remove o worktree SEM merge
 nvo attach                   tmux attach -t orquestra
 nvo stop [--keep-project]    encerra a sessao (maestro e agentes) preservando
@@ -37,13 +51,14 @@ nvo stop [--keep-project]    encerra a sessao (maestro e agentes) preservando
    absoluto ou ~, sudo, git push, git reset --hard, git checkout ou switch
    para main ou master, curl ou wget com pipe para sh ou bash, chmod 777,
    e qualquer acesso a .env, .env.*, *.pem, id_rsa, ~/.ssh, ~/.aws
-5. O agente orquestrador nunca edita codigo. Ele so usa nvo new, read,
-   send e note.
+5. O agente orquestrador nunca edita codigo. Ele so usa nvo new, ls, read,
+   send, note, diff e approve — nunca nvo done nem nvo kill.
 6. nvo done nunca faz merge automatico; a decisao e sempre humana e sempre
-   depois de ver o diff. No terminal, sem --confirm, o nvo pede o nome do
-   agente. No app, o diff aparece na tela e a confirmacao e um clique
-   deliberado em "aplicar no projeto" — digitar o nome nao acrescentava
-   seguranca, so atrito, entao a interface grafica passa o nome sozinha.
+   depois de ver o diff. Caminho padrao: o app, onde a confirmacao e um
+   clique deliberado em "aplicar no projeto" no card do agente — digitar o
+   nome ali nao acrescentava seguranca, so atrito, entao a interface grafica
+   passa o nome sozinha via --confirm. Alternativa: o terminal, sem
+   --confirm, onde o nvo pede para digitar o nome do agente.
 7. Worktree fora de ~/orquestra/worktrees e recusado.
 
 ## Notas compartilhadas

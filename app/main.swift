@@ -1084,8 +1084,19 @@ final class Orchestra: ObservableObject {
 
     func approvePlan(_ name: String) {
         DispatchQueue.global().async {
-            self.nvo(["approve", name])
-            DispatchQueue.main.async { self.refresh() }
+            let r = self.nvo(["approve", name])
+            DispatchQueue.main.async {
+                if r.code == 0 {
+                    self.avisar("plano de \(name) aprovado",
+                                "ele voltou a trabalhar — o card muda para “trabalhando”",
+                                icone: "play.circle.fill", cor: AgentStatus.trabalhando.color)
+                } else {
+                    // o clique nao podia mais falhar calado: era identico a
+                    // botao quebrado para quem estava olhando
+                    self.lastError = self.erroDe(r, "approve \(name)")
+                }
+                self.refresh()
+            }
         }
     }
 

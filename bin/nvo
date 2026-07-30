@@ -825,15 +825,16 @@ agent_status() {
   note="$(note_path "$1")"
   [ -f "$note" ] || { echo trabalhando; return; }
   last="$(tail -c 4000 "$note" \
-    | grep -oiE 'STATUS:[[:space:]]*CONCLU|STATUS:[[:space:]]*AGUARDANDO|BLOQUEADO|BLOQUEIO:' \
+    | grep -oiE 'STATUS:[[:space:]]*CONCLU|STATUS:[[:space:]]*AGUARDANDO|STATUS:[[:space:]]*TRABALHANDO|BLOQUEADO|BLOQUEIO:' \
     | tail -1 | tr '[:lower:]' '[:upper:]')"
   case "$last" in
     *CONCLU*)
       if check_is_verified "$1"; then echo concluido_verificado
       else echo concluido_sem_verificacao
       fi ;;
-    *AGUARDANDO*) echo aguardando ;;
-    *BLOQUE*)     echo bloqueado ;;
+    *AGUARDANDO*)   echo aguardando ;;
+    *TRABALHANDO*)  echo trabalhando ;;
+    *BLOQUE*)       echo bloqueado ;;
     *)            echo trabalhando ;;
   esac
 }
@@ -1400,6 +1401,14 @@ cmd_approve() {
   cmd_note "$1"
   echo
   cmd_send "$1" "Plano aprovado. Execute o plano que voce registrou nas notas. Se surgir duvida que mude o resultado, pare e escreva BLOQUEADO: <pergunta> nas notas."
+
+  # O status sai da ultima marca da nota, e ela continuaria dizendo
+  # "AGUARDANDO APROVACAO" ate o agente se lembrar de reescrever — as vezes
+  # minutos depois. Registramos a aprovacao na hora: o painel muda no ato e
+  # quem clicou ve que o clique valeu, em vez de achar que o botao quebrou.
+  printf '\n## %s — plano aprovado por voce\nSTATUS: TRABALHANDO\n' \
+    "$(date '+%Y-%m-%d %H:%M')" >> "$(note_path "$1")"
+
   echo "plano aprovado — '$1' voltou a trabalhar"
 }
 

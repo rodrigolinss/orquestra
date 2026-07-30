@@ -213,6 +213,30 @@ struct UsageInfo: Equatable {
     }
 }
 
+// Um limite configuravel da equipe, com a faixa aceita e o porque — o numero
+// sozinho nao ajuda ninguem a decidir se deve mexer nele.
+enum Aba: String, CaseIterable, Identifiable {
+    case painel, ajustes, ajuda
+    var id: String { rawValue }
+    var titulo: String {
+        switch self {
+        case .painel: return "painel"
+        case .ajustes: return "ajustes"
+        case .ajuda: return "ajuda · sobre"
+        }
+    }
+}
+
+struct Limite: Identifiable, Equatable {
+    let key: String
+    var value: Int
+    let min: Int
+    let max: Int
+    let label: String
+    let help: String
+    var id: String { key }
+}
+
 struct Harness: Identifiable, Equatable {
     let id: String
     let label: String
@@ -276,6 +300,7 @@ final class Orchestra: ObservableObject {
     @Published var codexInstalled = false
     @Published var usage: UsageInfo?
     @Published var harnesses: [Harness] = []
+    @Published var limites: [Limite] = []
 
     private var lastStatus: [String: AgentStatus] = [:]
     private var timer: Timer?
@@ -301,8 +326,35 @@ final class Orchestra: ObservableObject {
         }
     }
 
+    func refreshConfig() {
+        DispatchQueue.global().async { [weak self] in
+            let r = sh(NVO, ["config"])
+            guard r.code == 0 else { return }
+            let lista: [Limite] = r.out.split(separator: "\n").compactMap { linha in
+                let c = linha.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                guard c.count >= 6, let v = Int(c[1]), let mn = Int(c[2]), let mx = Int(c[3])
+                else { return nil }
+                return Limite(key: c[0], value: v, min: mn, max: mx, label: c[4], help: c[5])
+            }
+            DispatchQueue.main.async { self?.limites = lista }
+        }
+    }
+
+    func setLimite(_ key: String, _ value: Int) {
+        DispatchQueue.global().async { [weak self] in
+            let r = sh(NVO, ["config", key, "\(value)"])
+            DispatchQueue.main.async {
+                if r.code != 0 {
+                    self?.lastError = (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                self?.refreshConfig()
+            }
+        }
+    }
+
     init() {
         refreshHarnesses()
+        refreshConfig()
         refresh()
         refreshUsage()
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -1511,6 +1563,169 @@ struct FileViewer: View {
     }
 }
 
+// MARK: - Ajustes
+
+// Configurar nao pode exigir abrir arquivo nem decorar nome de variavel: cada
+// limite aparece com o valor, a faixa aceita e o motivo de existir, ao lado do
+// efeito pratico de mexer nele.
+struct AjustesView: View {
+    @ObservedObject var orch: Orchestra
+    @ObservedObject private var scale = UIScale.shared
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+
+                secao("Limites da equipe",
+                      "Valem para você e para os agentes: quando um deles tenta criar um subagente além do limite, o nvo recusa e explica o motivo.") {
+                    VStack(spacing: 14) {
+                        ForEach(orch.limites) { l in
+                            LimiteRow(limite: l) { novo in orch.setLimite(l.key, novo) }
+                        }
+                        if orch.limites.isEmpty {
+                            Text("carregando…").font(.system(size: Theme.uiSize(10)))
+                                .foregroundColor(Theme.dim)
+                        }
+                    }
+                }
+
+                secao("Quem executa os agentes",
+                      "Cada agente roda numa CLI. As que faltam aparecem com o comando de instalação — depois de instalar, volte aqui e recarregue.") {
+                    VStack(spacing: 8) {
+                        ForEach(orch.harnesses) { h in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: h.installed ? "checkmark.circle.fill" : "circle.dashed")
+                                    .font(.system(size: Theme.uiSize(12)))
+                                    .foregroundColor(h.installed ? Theme.accent : Theme.dim.opacity(0.5))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(h.label)
+                                        .font(.system(size: Theme.uiSize(11), weight: .semibold))
+                                        .foregroundColor(h.installed ? Theme.text : Theme.dim)
+                                    if h.installed {
+                                        Text("modelos: \(h.models.joined(separator: ", "))")
+                                            .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                                            .foregroundColor(Theme.dim)
+                                    } else {
+                                        Text(h.install)
+                                            .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                                            .foregroundColor(Theme.dim.opacity(0.85))
+                                            .textSelection(.enabled)
+                                    }
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.white.opacity(0.035))
+                            .cornerRadius(6)
+                        }
+                        HStack(spacing: 8) {
+                            SmallButton(label: "recarregar", icon: "arrow.clockwise",
+                                        help: "relê o registro e verifica de novo o que está instalado") {
+                                orch.refreshHarnesses()
+                                orch.refreshConfig()
+                            }
+                            SmallButton(label: "abrir harnesses.conf", icon: "doc.text",
+                                        help: "adicione a sua própria CLI — é um arquivo de texto, sem recompilar nada") {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: "\(ORQ)/bin/harnesses.conf"))
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+
+                secao("Aparência",
+                      "O zoom vale para toda a interface e fica salvo entre sessões.") {
+                    HStack(spacing: 10) {
+                        SmallButton(label: "menor", icon: "textformat.size.smaller") { scale.zoomOut() }
+                        Text(scale.label)
+                            .font(.system(size: Theme.uiSize(12), design: .monospaced))
+                            .foregroundColor(Theme.text).frame(minWidth: Theme.uiSize(52))
+                        SmallButton(label: "maior", icon: "textformat.size.larger") { scale.zoomIn() }
+                        SmallButton(label: "padrão", icon: "arrow.uturn.backward") { scale.reset() }
+                        Spacer()
+                        Text("⌘+ · ⌘− · ⌘0")
+                            .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                            .foregroundColor(Theme.dim)
+                    }
+                }
+            }
+            .padding(28)
+            .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Theme.bg)
+        .onAppear { orch.refreshConfig(); orch.refreshHarnesses() }
+    }
+
+    @ViewBuilder
+    private func secao<C: View>(_ titulo: String, _ subtitulo: String,
+                                @ViewBuilder _ conteudo: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(titulo).font(.system(size: Theme.uiSize(13), weight: .bold))
+                .foregroundColor(Theme.text)
+            Text(subtitulo).font(.system(size: Theme.uiSize(10)))
+                .foregroundColor(Theme.dim)
+                .fixedSize(horizontal: false, vertical: true)
+            conteudo()
+        }
+    }
+}
+
+struct LimiteRow: View {
+    let limite: Limite
+    let onChange: (Int) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(limite.label)
+                    .font(.system(size: Theme.uiSize(11), weight: .semibold))
+                    .foregroundColor(Theme.text)
+                Text(limite.help)
+                    .font(.system(size: Theme.uiSize(9)))
+                    .foregroundColor(Theme.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            VStack(spacing: 3) {
+                HStack(spacing: 6) {
+                    passo("minus", ativo: limite.value > limite.min) {
+                        onChange(limite.value - 1)
+                    }
+                    Text("\(limite.value)")
+                        .font(.system(size: Theme.uiSize(15), weight: .bold, design: .monospaced))
+                        .foregroundColor(Theme.accent)
+                        .frame(minWidth: Theme.uiSize(28))
+                    passo("plus", ativo: limite.value < limite.max) {
+                        onChange(limite.value + 1)
+                    }
+                }
+                Text("\(limite.min)–\(limite.max)")
+                    .font(.system(size: Theme.uiSize(8), design: .monospaced))
+                    .foregroundColor(Theme.dim.opacity(0.7))
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(Color.white.opacity(0.035))
+        .cornerRadius(6)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.cardBorder))
+    }
+
+    private func passo(_ icone: String, ativo: Bool, _ acao: @escaping () -> Void) -> some View {
+        Button(action: { if ativo { acao() } }) {
+            Image(systemName: icone)
+                .font(.system(size: Theme.uiSize(10), weight: .bold))
+                .foregroundColor(ativo ? Theme.text : Theme.dim.opacity(0.3))
+                .frame(width: Theme.uiSize(22), height: Theme.uiSize(20))
+                .background(Color.white.opacity(ativo ? 0.07 : 0.02))
+                .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
+        .disabled(!ativo)
+    }
+}
+
 // Xadrez cinza classico para indicar transparencia atras da imagem.
 struct TransparencyChecker: View {
     var body: some View {
@@ -2058,7 +2273,7 @@ struct ContentView: View {
     @State private var diffText = "carregando…"
     @State private var showFiles = false
     @State private var openFile: String?
-    @State private var helpTab = false
+    @State private var tab: Aba = .painel
     @ObservedObject private var scale = UIScale.shared
     @ObservedObject private var layout = AgentLayout.shared
 
@@ -2083,17 +2298,15 @@ struct ContentView: View {
                 .onHover { inside in
                     if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
-                // abas: painel | ajuda · sobre
+                // abas: painel | ajustes | ajuda · sobre
                 HStack(spacing: 2) {
-                    ForEach([false, true], id: \.self) { isHelp in
-                        Button {
-                            helpTab = isHelp
-                        } label: {
-                            Text(isHelp ? "ajuda · sobre" : "painel")
-                                .font(.system(size: Theme.uiSize(10), weight: helpTab == isHelp ? .semibold : .regular))
-                                .foregroundColor(helpTab == isHelp ? Theme.text : Theme.dim)
+                    ForEach(Aba.allCases) { a in
+                        Button { tab = a } label: {
+                            Text(a.titulo)
+                                .font(.system(size: Theme.uiSize(10), weight: tab == a ? .semibold : .regular))
+                                .foregroundColor(tab == a ? Theme.text : Theme.dim)
                                 .padding(.horizontal, 10).padding(.vertical, 4)
-                                .background(helpTab == isHelp ? Color.white.opacity(0.08) : .clear)
+                                .background(tab == a ? Color.white.opacity(0.08) : .clear)
                                 .cornerRadius(5)
                         }
                         .buttonStyle(.plain)
@@ -2136,13 +2349,13 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.05))
                 .cornerRadius(5)
 
-                if !helpTab, layout.isCustomized {
+                if tab == .painel, layout.isCustomized {
                     SmallButton(label: "realinhar", icon: "square.grid.2x2",
                                 help: "devolve todos os cards ao tamanho e à posição automáticos") {
                         withAnimation(.easeOut(duration: 0.2)) { layout.resetAll() }
                     }
                 }
-                if !helpTab, orch.project != nil {
+                if tab == .painel, orch.project != nil {
                     SmallButton(label: "arquivos", icon: "sidebar.left",
                                 tint: showFiles ? Theme.accent : Theme.dim,
                                 help: "abre o navegador de arquivos: veja o projeto e o que cada agente mexeu (bolinha verde = recente)") {
@@ -2150,13 +2363,13 @@ struct ContentView: View {
                         if !showFiles { openFile = nil }
                     }
                 }
-                if !helpTab, orch.project != nil {
+                if tab == .painel, orch.project != nil {
                     SmallButton(label: "encerrar sessão", icon: "stop.circle",
                                 help: "desliga maestro e agentes para você trocar de contexto — o trabalho fica salvo") {
                         sheet = SheetTarget(name: "", kind: .stop)
                     }
                 }
-                if !helpTab {
+                if tab == .painel {
                     SmallButton(label: "projeto", icon: "folder",
                                 help: "escolher a pasta ou repositório do GitHub em que a equipe vai trabalhar") { showInit = true }
                     SmallButton(label: "novo agente", icon: "plus", tint: Theme.accent,
@@ -2167,7 +2380,7 @@ struct ContentView: View {
             .background(Theme.card)
 
             // medidor: uso do Claude Code na maquina toda (nao so os agentes daqui)
-            if !helpTab, let u = orch.usage {
+            if tab == .painel, let u = orch.usage {
                 HStack(spacing: 12) {
                     Text("uso claude code")
                         .foregroundColor(Theme.dim.opacity(0.7))
@@ -2215,17 +2428,24 @@ struct ContentView: View {
                 .background(Color(red: 1.0, green: 0.42, blue: 0.42))
             }
 
-            if helpTab {
+            if tab == .ajuda {
                 HelpView()
+            } else if tab == .ajustes {
+                AjustesView(orch: orch)
             } else {
             HStack(spacing: 0) {
             if showFiles {
                 FileBrowser(orch: orch) { openFile = $0 }
                 Divider().background(Theme.cardBorder)
             }
-            // rola nos dois eixos: o canvas cresce conforme voce espalha os cards
+            // rola nos dois eixos: o canvas cresce conforme voce espalha os cards.
+            // O GeometryReader existe para anular a centralizacao implicita do
+            // ScrollView: conteudo menor que a janela seria centralizado, e cada
+            // crescimento do canvas re-centralizaria tudo, "empurrando" os cards
+            // de volta durante o arraste — em ultrawide isso travava o lado.
+            GeometryReader { viewport in
             ScrollView([.vertical, .horizontal]) {
-                VStack(spacing: 40) {
+                VStack(alignment: .leading, spacing: 40) {
                     // onboarding: o proximo passo sempre visivel
                     if orch.project == nil {
                         StepCard(step: "1",
@@ -2321,6 +2541,13 @@ struct ContentView: View {
                 }
                 .padding(.vertical, 32)
                 .padding(.horizontal, 24)
+                // conteudo nunca menor que a janela, ancorado no canto: sem
+                // centralizacao, o canvas so cresce para a direita/baixo e o
+                // arraste lateral e 100% livre em qualquer largura de tela
+                .frame(minWidth: viewport.size.width,
+                       minHeight: viewport.size.height,
+                       alignment: .topLeading)
+            }
             }
             .background(Theme.bg)
             if let f = openFile {

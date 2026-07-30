@@ -29,22 +29,70 @@ export PATH
 
 # --- Limites da hierarquia -------------------------------------------------
 # Um agente pode delegar criando subagentes, mas arvore de agente cresce em
-# custo e cai em supervisao muito rapido. Os numeros abaixo sao o ponto onde
-# delegacao ainda ajuda mais do que atrapalha:
-#
-#   NVO_MAX_DEPTH=2   maestro(0) -> agente(1) -> subagente(2). No nivel 3 o
-#                     trabalho ja chega distorcido: cada camada reescreve a
-#                     tarefa com as proprias palavras, e ninguem no topo
-#                     consegue mais dizer o que foi realmente pedido.
-#   NVO_MAX_FANOUT=4  filhos por agente. Acima disso o pai gasta mais token
-#                     coordenando do que o trabalho economiza.
-#   NVO_MAX_AGENTS=8  agentes vivos ao mesmo tempo, somando todas as camadas.
-#                     E o teto pratico de uma janela de 5h do plano Max.
-#
-# Todos ajustaveis por variavel de ambiente para quem quiser outro equilibrio.
-NVO_MAX_DEPTH="${NVO_MAX_DEPTH:-2}"
-NVO_MAX_FANOUT="${NVO_MAX_FANOUT:-4}"
-NVO_MAX_AGENTS="${NVO_MAX_AGENTS:-8}"
+# custo e cai em supervisao muito rapido. Os padroes abaixo sao o ponto onde
+# delegacao ainda ajuda mais do que atrapalha. Precedencia:
+#   variavel de ambiente  >  config.conf  >  padrao daqui
+CONFIG="$ORQ/config.conf"
+
+config_get() {
+  local chave="$1" padrao="$2" valor=""
+  [ -f "$CONFIG" ] && valor="$(sed -n "s/^$chave=//p" "$CONFIG" | tail -1)"
+  printf '%s' "${valor:-$padrao}"
+}
+
+NVO_MAX_DEPTH="${NVO_MAX_DEPTH:-$(config_get max_depth 2)}"
+NVO_MAX_FANOUT="${NVO_MAX_FANOUT:-$(config_get max_fanout 4)}"
+NVO_MAX_AGENTS="${NVO_MAX_AGENTS:-$(config_get max_agents 12)}"
+
+# faixa aceita por chave: min, max e a explicacao que o app mostra
+config_spec() {
+  case "$1" in
+    max_depth)  echo "1|4|camadas de delegação|Quantos níveis abaixo do maestro. Cada camada afasta o trabalho de quem pediu: acima de 3 o pedido chega distorcido, porque cada nível reescreve a tarefa com as próprias palavras." ;;
+    max_fanout) echo "1|8|subagentes por agente|Quantos filhos cada agente pode criar. Acima de 4 o pai gasta mais token coordenando do que o trabalho economiza." ;;
+    max_agents) echo "1|24|agentes vivos ao mesmo tempo|Teto somando todas as camadas. Cada agente ativo consome contexto e janela de uso — 12 é confortável no plano Max; acima de 16 a janela de 5h costuma estourar." ;;
+    *) return 1 ;;
+  esac
+}
+
+# nvo config                  lista chave, valor, min, max, rotulo e explicacao
+# nvo config <chave> <valor>  grava, validando a faixa
+cmd_config() {
+  local chave valor spec min max rotulo ajuda
+  if [ $# -eq 0 ]; then
+    for chave in max_depth max_fanout max_agents; do
+      spec="$(config_spec "$chave")"
+      IFS='|' read -r min max rotulo ajuda <<EOF
+$spec
+EOF
+      case "$chave" in
+        max_depth)  valor="$NVO_MAX_DEPTH" ;;
+        max_fanout) valor="$NVO_MAX_FANOUT" ;;
+        max_agents) valor="$NVO_MAX_AGENTS" ;;
+      esac
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$chave" "$valor" "$min" "$max" "$rotulo" "$ajuda"
+    done
+    return 0
+  fi
+
+  [ $# -eq 2 ] || die "uso: nvo config [<chave> <valor>]"
+  chave="$1"; valor="$2"
+  spec="$(config_spec "$chave")" || die "chave desconhecida '$chave' (use: max_depth, max_fanout, max_agents)"
+  IFS='|' read -r min max rotulo ajuda <<EOF
+$spec
+EOF
+  printf '%s' "$valor" | grep -Eq '^[0-9]+$' || die "'$valor' nao e um numero inteiro"
+  [ "$valor" -ge "$min" ] && [ "$valor" -le "$max" ] \
+    || die "$chave aceita de $min a $max (recebi $valor)"
+
+  touch "$CONFIG"
+  if grep -q "^$chave=" "$CONFIG" 2>/dev/null; then
+    # sed -i portatil entre BSD e GNU: reescreve num temporario
+    sed "s/^$chave=.*/$chave=$valor/" "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
+  else
+    printf '%s=%s\n' "$chave" "$valor" >> "$CONFIG"
+  fi
+  echo "$rotulo: $valor"
+}
 
 # NVO_AGENT_CMD existe para testes (ex.: "bash"); em uso real e sempre claude,
 # SEM --dangerously-skip-permissions (regra 2 do SPEC).
@@ -111,6 +159,9 @@ nvo — orquestrador local de agentes Claude Code
   nvo attach                   entra na sessao tmux "orquestra"
   nvo stop [--forget-project]  encerra a sessao (maestro e agentes) preservando
                                worktrees, branches, notas e o projeto ativo
+  nvo harnesses                lista as CLIs de agente e quais estao instaladas
+  nvo config [<chave> <valor>] le ou ajusta os limites da equipe
+                               (max_depth, max_fanout, max_agents)
   nvo doctor                   diagnostica o ambiente (deps, login, hook)
   nvo usage [--json]           consumo de tokens: sessao 5h, dia, modelos
 EOF
@@ -738,6 +789,7 @@ case "${1:-}" in
   maestro) shift; cmd_maestro "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
   harnesses) shift; cmd_harnesses "$@" ;;
+  config)  shift; cmd_config "$@" ;;
   approve) shift; cmd_approve "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;

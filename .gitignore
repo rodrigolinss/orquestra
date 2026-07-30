@@ -4,6 +4,7 @@ notes/
 agents/
 repos/
 project.conf
+config.conf
 
 # artefatos de build
 app/Orquestra

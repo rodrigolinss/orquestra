@@ -1083,13 +1083,19 @@ final class AgentLayout: ObservableObject {
     // o maestro vive no mesmo canvas e tambem se move e redimensiona;
     // "@" nao e valido em nome de agente, entao a chave nunca colide
     static let maestroKey = "@maestro"
-    static let maestroDefault = Box(x: 190, y: 0, w: 760, h: 470)
+    // x = (1076 - 760) / 2: maestro centrado sobre o cluster de 3 colunas
+    static let maestroDefault = Box(x: 158, y: 0, w: 760, h: 470)
     static let maestroMinW: CGFloat = 480
     static let maestroMinH: CGFloat = 300
     // as vagas dos agentes comecam abaixo do maestro, com folga para os cabos
     private static let agentsTop: CGFloat = maestroDefault.y + maestroDefault.h + 96
 
     @Published private(set) var boxes: [String: Box] = [:]
+
+    // deslocamento de origem das posicoes PADRAO: calculado a partir da largura
+    // da janela para o arranjo inicial nascer centralizado. So afeta cards que
+    // o usuario nunca moveu — posicao arrastada e absoluta e nao se mexe.
+    @Published var originX: CGFloat = 0
 
     private init() {
         guard let raw = UserDefaults.standard.dictionary(forKey: Self.key) as? [String: [Double]]
@@ -1104,15 +1110,21 @@ final class AgentLayout: ObservableObject {
         UserDefaults.standard.set(raw, forKey: Self.key)
     }
 
-    // vaga natural: fileiras de 3 abaixo do maestro, na ordem dos agentes
-    static func slot(_ index: Int) -> Box {
-        let col = index % cols, row = index / cols
-        return Box(x: CGFloat(col) * (defW + gap),
-                   y: agentsTop + CGFloat(row) * (defH + gap),
-                   w: defW, h: defH)
+    // vaga natural: fileiras de 3 abaixo do maestro, na ordem dos agentes,
+    // deslocadas pela origem centralizada
+    func slot(_ index: Int) -> Box {
+        let col = index % Self.cols, row = index / Self.cols
+        return Box(x: originX + CGFloat(col) * (Self.defW + Self.gap),
+                   y: Self.agentsTop + CGFloat(row) * (Self.defH + Self.gap),
+                   w: Self.defW, h: Self.defH)
     }
 
-    var maestroBox: Box { boxes[Self.maestroKey] ?? Self.maestroDefault }
+    var maestroBox: Box {
+        if let b = boxes[Self.maestroKey] { return b }
+        var d = Self.maestroDefault
+        d.x += originX
+        return d
+    }
 
     func moveMaestro(by d: CGSize) {
         var b = maestroBox
@@ -1131,7 +1143,7 @@ final class AgentLayout: ObservableObject {
     }
 
     func box(_ name: String, index: Int) -> Box {
-        boxes[name] ?? Self.slot(index)
+        boxes[name] ?? slot(index)
     }
 
     func move(_ name: String, index: Int, by d: CGSize) {
@@ -2547,6 +2559,15 @@ struct ContentView: View {
                 .frame(minWidth: viewport.size.width,
                        minHeight: viewport.size.height,
                        alignment: .topLeading)
+                // as posicoes PADRAO nascem centralizadas na janela: originX
+                // desloca apenas cards nunca movidos, e muda so em resize —
+                // nunca durante um gesto, entao nada e "puxado de volta"
+                .onAppear {
+                    layout.originX = max(0, (viewport.size.width - 48 - 1076) / 2)
+                }
+                .onChange(of: viewport.size.width) { w in
+                    layout.originX = max(0, (w - 48 - 1076) / 2)
+                }
             }
             }
             .background(Theme.bg)

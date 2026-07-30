@@ -6,7 +6,9 @@
 
 set -euo pipefail
 
-ORQ="$HOME/orquestra"
+# Onde o orquestra esta instalado. Configuravel para quem nao quer no
+# ~/orquestra — e para o autoteste, que precisa apontar para uma copia.
+ORQ="${NVO_HOME:-$HOME/orquestra}"
 # shellcheck source=platform.sh
 [ -f "$ORQ/bin/platform.sh" ] && . "$ORQ/bin/platform.sh" || {
   ORQ_OS="desconhecido"; ORQ_PKG="none"; ORQ_HAS_APP=0; ORQ_PTY=""
@@ -380,6 +382,7 @@ nvo — orquestrador local de agentes Claude Code
   nvo harnesses                lista as CLIs de agente e quais estao instaladas
   nvo config [<chave> <valor>] le ou ajusta os limites da equipe
                                (max_depth, max_fanout, max_agents)
+  nvo update [--check]         busca e aplica atualizacao do proprio orquestra
   nvo doctor                   diagnostica o ambiente (deps, login, hook)
   nvo autoteste                prova o fluxo inteiro (criar, ler, aprovar, limpar)
                                num repo temporario, sem gastar token
@@ -1035,6 +1038,73 @@ cmd_autoteste() {
     echo "rode 'nvo doctor' primeiro; se ele estiver ok, abra uma issue com a saida acima."
   fi
   [ "$falhas" -eq 0 ]
+}
+
+# Atualizar o proprio orquestra. O ~/orquestra e um clone git, entao saber se
+# ha novidade e um fetch, e aplicar e um merge fast-forward. Nunca sobrescreve
+# nada: se voce tem trabalho local nao commitado, ou commits que ainda nao
+# foram publicados, o comando recusa e explica — quem mexe no proprio orquestra
+# nao pode perder o que escreveu por causa de uma atualizacao automatica.
+#
+#   nvo update --check   silencioso; codigo 0 = ha novidade, 1 = ja esta em dia
+#   nvo update           aplica, recompila o app no macOS e lista o que mudou
+cmd_update() {
+  local checar=0
+  case "${1:-}" in
+    --check) checar=1 ;;
+    "") ;;
+    *) die "uso: nvo update [--check]" ;;
+  esac
+
+  git -C "$ORQ" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "o $ORQ nao e um clone git — atualize baixando de novo do repositorio"
+
+  local ramo remoto
+  ramo="$(git -C "$ORQ" symbolic-ref --short HEAD 2>/dev/null || echo main)"
+  remoto="origin/$ramo"
+
+  git -C "$ORQ" fetch --quiet origin "$ramo" 2>/dev/null \
+    || { [ "$checar" = 1 ] && return 1; die "nao consegui falar com o repositorio (sem rede?)"; }
+
+  git -C "$ORQ" rev-parse --verify --quiet "$remoto" >/dev/null \
+    || { [ "$checar" = 1 ] && return 1; die "nao existe $remoto"; }
+
+  local atras adiante
+  atras="$(git -C "$ORQ" rev-list --count "HEAD..$remoto" 2>/dev/null || echo 0)"
+  adiante="$(git -C "$ORQ" rev-list --count "$remoto..HEAD" 2>/dev/null || echo 0)"
+
+  if [ "$checar" = 1 ]; then
+    [ "$atras" -gt 0 ] && { echo "$atras"; return 0; }
+    return 1
+  fi
+
+  if [ "$atras" -eq 0 ]; then
+    echo "o orquestra ja esta na versao mais nova"
+    return 0
+  fi
+
+  # Trabalho local nao se perde por atualizacao. Nos dois casos abaixo quem
+  # decide e a pessoa; o comando so aponta o que esta no caminho.
+  [ -z "$(git -C "$ORQ" status --porcelain)" ] || die \
+    "ha mudancas nao salvas em $ORQ — commite ou descarte antes de atualizar (git -C $ORQ status)"
+  [ "$adiante" -eq 0 ] || die \
+    "voce tem $adiante commit(s) locais que ainda nao estao no repositorio; publique antes (git -C $ORQ push) ou atualize na mao"
+
+  echo "== $atras novidade(s):"
+  git -C "$ORQ" log --oneline --no-decorate "HEAD..$remoto" | sed 's/^/  /'
+  echo
+
+  git -C "$ORQ" merge --ff-only --quiet "$remoto" || die "a atualizacao falhou no merge"
+  chmod +x "$ORQ/bin/nvo" "$ORQ/bin/guard.sh" 2>/dev/null || true
+  echo "atualizado."
+
+  if [ "$ORQ_HAS_APP" = 1 ] && [ -f "$ORQ/app/build.sh" ] && xcrun swiftc --version >/dev/null 2>&1; then
+    echo "-> recompilando o app"
+    bash "$ORQ/app/build.sh" >/dev/null 2>&1 \
+      && echo "   ok — feche e reabra o Orquestra para a versao nova valer" \
+      || echo "   aviso: a recompilacao falhou; rode: bash $ORQ/app/build.sh"
+  fi
+  echo "os agentes em andamento nao foram tocados."
 }
 
 cmd_maestro() {
@@ -1832,6 +1902,7 @@ case "${1:-}" in
   projects) shift; cmd_projects "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   autoteste) shift; cmd_autoteste "$@" ;;
+  update)  shift; cmd_update "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
   -h|--help|help|"") usage ;;
   *) die "comando desconhecido: $1 (veja nvo --help)" ;;

@@ -184,6 +184,7 @@ nvo religar --todos                   # terminal caiu? recria as janelas e retom
 nvo projects                          # projetos já usados e quantos agentes vivos em cada
 nvo limpar                            # recomeço: maestro novo, quadro em branco, notas arquivadas
 nvo stop                              # encerra a sessão, preservando o trabalho
+nvo update                            # baixa e aplica a versão nova do próprio Orquestra
 nvo doctor                            # diagnóstico do ambiente
 nvo autoteste                         # prova o fluxo inteiro sem gastar token
 nvo usage                             # consumo de tokens: janela de 5h, dia, modelos
@@ -212,6 +213,21 @@ O Orquestra é desenhado para manter a supervisão barata e o gasto visível:
 2. **Dimensione o modelo** — builders e reviewers raramente precisam do modelo topo de linha. O Sonnet entrega a maior parte das tarefas de código a ~40% do custo do Opus; o Haiku dá conta do trabalho mecânico a ~20%.
 3. **Tarefas fechadas gastam menos** — uma tarefa delimitada ("implementa X conforme docs/x.md, com testes") termina com muito menos tokens do que uma aberta ("melhora o backend").
 4. **Notas em vez de telas** — o maestro lê as notas dos agentes em vez de reler o scrollback do terminal, mantendo o próprio contexto pequeno.
+
+## Atualizar
+
+O Orquestra se instala como um clone git, então atualizar é `git` por baixo:
+
+```bash
+nvo update            # busca, mostra o que mudou, aplica e recompila o app
+nvo update --check    # só verifica, sem aplicar
+```
+
+O app verifica sozinho uma vez por hora e mostra um botão **`atualizar`** na barra de cima quando há novidade — com o número de versões pendentes. Aplicar continua sendo escolha sua: código que roda agentes na sua máquina não se troca sozinho pelas suas costas.
+
+Ele nunca sobrescreve trabalho seu. Se houver mudanças não salvas em `~/orquestra`, ou commits locais que ainda não foram publicados, o comando recusa e diz o que está no caminho. O merge é sempre fast-forward — não inventa resolução de conflito.
+
+Os agentes em andamento não são tocados: eles vivem no tmux e seguem rodando durante a atualização.
 
 ## Modelo de segurança
 

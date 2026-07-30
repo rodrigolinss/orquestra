@@ -486,6 +486,12 @@ final class Orchestra: ObservableObject {
     // codigo dele. Sem este aviso, voce fica olhando uma tela que ja esta
     // consertada no disco e nao na memoria — o erro custou uma sessao inteira.
     @Published var versaoNovaNoDisco = false
+    // Quantas novidades esperam no repositorio. Checado de hora em hora com um
+    // 'git fetch', que e barato; aplicar continua sendo escolha sua — codigo
+    // que roda agentes na sua maquina nao se troca sozinho pelas suas costas.
+    @Published var atualizacoes = 0
+    @Published var atualizando = false
+    private var ultimaChecagem: Date?
     private let binarioAoAbrir = Orchestra.dataDoBinario()
 
     static func dataDoBinario() -> Date? {
@@ -708,6 +714,7 @@ final class Orchestra: ObservableObject {
         refreshConfig()
         refresh()
         refreshUsage()
+        checarAtualizacao()
         timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.refresh()
         }
@@ -964,6 +971,7 @@ final class Orchestra: ObservableObject {
                 self.nomesConhecidos = nomes
                 self.primeiroCiclo = false
                 self.primeiraLeituraFeita = true
+                self.checarAtualizacao()
                 self.repo = repo
                 self.project = proj
                 // agente novo ganha uma vaga livre antes de ser desenhado,
@@ -1239,6 +1247,44 @@ final class Orchestra: ObservableObject {
                                 icone: "eraser.fill", cor: Theme.accent)
                 } else {
                     self.lastError = self.erroDe(r, "clear \(janela)")
+                }
+            }
+        }
+    }
+
+    func checarAtualizacao(forcado: Bool = false) {
+        if let u = ultimaChecagem, !forcado, Date().timeIntervalSince(u) < 3600 { return }
+        ultimaChecagem = Date()
+        DispatchQueue.global(qos: .background).async {
+            let r = sh(NVO, ["update", "--check"])
+            let n = Int(r.out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            DispatchQueue.main.async {
+                let novo = (r.code == 0) ? n : 0
+                if novo > 0, self.atualizacoes == 0 {
+                    self.avisar(novo == 1 ? "1 atualização do Orquestra disponível"
+                                          : "\(novo) atualizações do Orquestra disponíveis",
+                                "clique em “atualizar” na barra de cima quando quiser",
+                                icone: "arrow.down.circle.fill", cor: Theme.accent)
+                }
+                self.atualizacoes = novo
+            }
+        }
+    }
+
+    func atualizar() {
+        guard !atualizando else { return }
+        atualizando = true
+        DispatchQueue.global().async {
+            let r = sh(NVO, ["update"])
+            DispatchQueue.main.async {
+                self.atualizando = false
+                if r.code == 0 {
+                    self.atualizacoes = 0
+                    self.avisar("Orquestra atualizado",
+                                "feche e reabra para a versão nova valer — os agentes continuam rodando",
+                                icone: "checkmark.circle.fill", cor: AgentStatus.concluido.color)
+                } else {
+                    self.lastError = self.erroDe(r, "update")
                 }
             }
         }
@@ -4161,6 +4207,21 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                     .help("estes agentes perderam a janela do terminal (máquina dormiu, tmux caiu). O trabalho está salvo — religar traz cada um de volta para onde parou: \(orch.apagados.joined(separator: ", "))")
+                }
+                if orch.atualizacoes > 0 || orch.atualizando {
+                    Button { orch.atualizar() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.system(size: Theme.uiSize(9)))
+                            Text(orch.atualizando ? "atualizando…" : "atualizar (\(orch.atualizacoes))")
+                                .font(.system(size: Theme.uiSize(9), weight: .semibold))
+                        }
+                        .foregroundColor(Theme.bg)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Theme.accent).cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("há \(orch.atualizacoes) versão(ões) nova(s) do Orquestra no repositório. Clique para baixar e recompilar — seus agentes e seu trabalho não são tocados")
                 }
                 if orch.versaoNovaNoDisco {
                     Button { orch.reabrirApp() } label: {

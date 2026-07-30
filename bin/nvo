@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # nvo — orquestrador local de agentes Claude Code.
 # Cada agente roda em um git worktree isolado, em uma branch agent/<nome>,
-# dentro de uma janela da sessao tmux "orquestra".
+# dentro de uma janela da sessao tmux do projeto ("orquestra-<projeto>").
+# Projetos diferentes = sessoes diferentes: nada de um vaza no outro.
 
 set -euo pipefail
 
@@ -16,7 +17,14 @@ WT_ROOT="$ORQ/worktrees"
 NOTES_ROOT="$ORQ/notes"
 META_ROOT="$ORQ/agents"
 CONF="$ORQ/project.conf"
-SESSION="orquestra"
+# registro dos projetos ja usados, um caminho por linha, na ordem de uso
+PROJECTS="$ORQ/projects.conf"
+# Uma sessao tmux POR PROJETO. O nome final sai de session_name(), depois que
+# load_project souber qual e o projeto; ate la fica a base, que so serve para
+# mensagens de erro. Dois projetos abertos ao mesmo tempo nunca compartilham
+# sessao, janela, worktree nem nota — e o que permite duas abas do app.
+SESSION_BASE="orquestra"
+SESSION="$SESSION_BASE"
 
 # O nvo pode ser chamado pelo app (launchd), que herda um PATH minimo sem
 # homebrew e sem ~/.local/bin. Como o tmux congela o PATH de quando o servidor
@@ -158,7 +166,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo diff <nome>              diff da branch do agente contra a base
   nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
   nvo kill <nome>              encerra janela e remove worktree SEM merge
-  nvo attach                   entra na sessao tmux "orquestra"
+  nvo attach                   entra na sessao tmux deste projeto
+  nvo projects                 lista os projetos ja usados e agentes vivos
   nvo stop [--forget-project]  encerra a sessao (maestro e agentes) preservando
                                worktrees, branches, notas e o projeto ativo
   nvo harnesses                lista as CLIs de agente e quais estao instaladas
@@ -169,12 +178,75 @@ nvo — orquestrador local de agentes Claude Code
 EOF
 }
 
+# tmux aceita pouca coisa em nome de sessao: nada de ponto, dois-pontos ou
+# espaco. Trocamos tudo que nao for seguro por "_".
+session_name() {
+  printf '%s-%s' "$SESSION_BASE" \
+    "$(printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_')"
+}
+
+# Antes de existir uma sessao por projeto havia uma so, chamada "orquestra".
+# Renomeamos em vez de abandonar: quem tem agentes rodando agora nao perde
+# nenhuma janela ao atualizar o nvo.
+migrate_legacy_session() {
+  tmux has-session -t "$SESSION_BASE" 2>/dev/null || return 0
+  tmux has-session -t "$SESSION" 2>/dev/null && return 0
+  # so migra para o projeto que estava registrado como ativo — a sessao antiga
+  # era dele, e chuta-la para dentro de outro projeto misturaria dois mundos
+  [ -f "$CONF" ] && [ "$(cat "$CONF")" = "$REPO" ] || return 0
+  tmux rename-session -t "$SESSION_BASE" "$SESSION" 2>/dev/null || true
+}
+
+# O projeto vem, nesta ordem: NVO_PROJECT (cada aba do app manda o seu),
+# depois o project.conf (ultimo usado, que e o caminho de quem esta no
+# terminal). Assim duas abas com projetos diferentes nunca se pisam, e quem
+# usa so o terminal nao precisa mudar nada.
 load_project() {
-  [ -f "$CONF" ] || die "nenhum projeto ativo. Rode: nvo init <caminho-do-repo>"
-  REPO="$(cat "$CONF")"
+  if [ -n "${NVO_PROJECT:-}" ]; then
+    REPO="$NVO_PROJECT"
+    [ -d "$REPO" ] || die "projeto nao existe: $REPO"
+  else
+    [ -f "$CONF" ] || die "nenhum projeto ativo. Rode: nvo init <caminho-do-repo>"
+    REPO="$(cat "$CONF")"
+  fi
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 \
     || die "projeto registrado nao e mais um repo git: $REPO"
+  REPO="$(cd "$REPO" && pwd)"
   PROJ="$(basename "$REPO")"
+  SESSION="$(session_name "$PROJ")"
+  migrate_legacy_session
+}
+
+# Registra o caminho no historico de projetos, sem duplicar, mais recente em
+# cima. E o que alimenta a lista de "abrir projeto" do app.
+remember_project() {
+  local repo="$1" tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$repo" > "$tmp"
+  [ -f "$PROJECTS" ] && grep -vxF "$repo" "$PROJECTS" >> "$tmp" 2>/dev/null
+  # so mantem o que ainda existe como repo git
+  awk 'NF' "$tmp" | while IFS= read -r p; do
+    [ -d "$p" ] && git -C "$p" rev-parse --git-dir >/dev/null 2>&1 && printf '%s\n' "$p"
+  done > "$PROJECTS.new" 2>/dev/null || true
+  mv "$PROJECTS.new" "$PROJECTS" 2>/dev/null || true
+  rm -f "$tmp"
+}
+
+# nvo projects — um projeto por linha: caminho<TAB>nome<TAB>agentes vivos
+cmd_projects() {
+  [ -f "$PROJECTS" ] || return 0
+  local p nome sess n
+  while IFS= read -r p; do
+    [ -n "$p" ] && [ -d "$p" ] || continue
+    nome="$(basename "$p")"
+    sess="$(session_name "$nome")"
+    if tmux has-session -t "$sess" 2>/dev/null; then
+      n="$(tmux list-windows -t "$sess" -F '#W' 2>/dev/null | grep -cv '^maestro$' || true)"
+    else
+      n=0
+    fi
+    printf '%s\t%s\t%s\n' "$p" "$nome" "$n"
+  done < "$PROJECTS"
 }
 
 check_name() {
@@ -196,7 +268,7 @@ assert_wt_inside() {
 
 ensure_session() {
   tmux has-session -t "$SESSION" 2>/dev/null \
-    || tmux new-session -d -s "$SESSION" -n maestro -c "$ORQ"
+    || tmux new-session -d -s "$SESSION" -n maestro -c "${REPO:-$ORQ}"
   # um servidor tmux que subiu com PATH pobre (ex.: criado pelo app) continuaria
   # sem enxergar o claude nas janelas novas — reescrevemos o PATH do ambiente
   # global a cada chamada, que e barato e mantem as janelas futuras sadias.
@@ -230,6 +302,7 @@ cmd_init() {
   git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 \
     || die "nao e um repositorio git: $repo"
   echo "$repo" > "$CONF"
+  remember_project "$repo"
   echo "projeto ativo: $(basename "$repo") ($repo)"
 }
 
@@ -691,6 +764,9 @@ cmd_stop() {
     --keep-project|"") ;;
     *) die "uso: nvo stop [--forget-project]" ;;
   esac
+  # so derruba a sessao DESTE projeto: outra aba, com outro projeto, continua
+  # trabalhando sem perceber
+  load_project
   if tmux has-session -t "$SESSION" 2>/dev/null; then
     tmux kill-session -t "$SESSION"
     echo "sessao '$SESSION' encerrada (maestro e agentes desligados)"
@@ -719,6 +795,7 @@ cmd_kill() {
 }
 
 cmd_attach() {
+  load_project
   ensure_session
   exec tmux attach -t "$SESSION"
 }
@@ -841,6 +918,7 @@ case "${1:-}" in
   harnesses) shift; cmd_harnesses "$@" ;;
   config)  shift; cmd_config "$@" ;;
   approve) shift; cmd_approve "$@" ;;
+  projects) shift; cmd_projects "$@" ;;
   doctor)  shift; cmd_doctor "$@" ;;
   usage)   shift; exec python3 "$ORQ/bin/nvo-usage.py" "$@" ;;
   -h|--help|help|"") usage ;;

@@ -39,8 +39,11 @@ nvo stop [--keep-project]    encerra a sessao (maestro e agentes) preservando
    e qualquer acesso a .env, .env.*, *.pem, id_rsa, ~/.ssh, ~/.aws
 5. O agente orquestrador nunca edita codigo. Ele so usa nvo new, read,
    send e note.
-6. nvo done nunca faz merge automatico. A confirmacao digitada e obrigatoria
-   em qualquer interface: sem o nome exato do agente, o merge e recusado.
+6. nvo done nunca faz merge automatico; a decisao e sempre humana e sempre
+   depois de ver o diff. No terminal, sem --confirm, o nvo pede o nome do
+   agente. No app, o diff aparece na tela e a confirmacao e um clique
+   deliberado em "aplicar no projeto" — digitar o nome nao acrescentava
+   seguranca, so atrito, entao a interface grafica passa o nome sozinha.
 7. Worktree fora de ~/orquestra/worktrees e recusado.
 
 ## Notas compartilhadas

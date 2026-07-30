@@ -1,7 +1,7 @@
 // Orquestra.app — painel visual nativo do orquestrador nvo.
 // Maestro no topo, agentes conectados por cabos, notas como fonte de verdade.
-// O merge (nvo done) abre o Terminal de proposito: confirmacao digitada e
-// decisao humana, nunca um botao.
+// O merge (nvo done) acontece dentro do app: o diff na tela e a decisao humana,
+// um clique deliberado em "aplicar no projeto". Nunca automatico.
 
 import SwiftUI
 import AppKit
@@ -11,7 +11,13 @@ import AppKit
 let HOME = FileManager.default.homeDirectoryForCurrentUser.path
 let ORQ = "\(HOME)/orquestra"
 let NVO = "\(ORQ)/bin/nvo"
-let SESSION = "orquestra"
+let SESSION_BASE = "orquestra"
+
+// tmux nao aceita ponto nem dois-pontos em nome de sessao — mesma regra do nvo
+func sessionName(_ project: String) -> String {
+    let ok = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+    return SESSION_BASE + "-" + String(project.map { ok.contains($0) ? $0 : "_" })
+}
 
 // O app roda pelo launchd, que da um PATH minimo (/usr/bin:/bin:...). Isso nao
 // alcanca nem o homebrew nem ~/.local/bin — onde o Claude Code costuma morar.
@@ -37,12 +43,14 @@ let TMUX = toolPath("tmux")
 let GIT = "/usr/bin/git"
 
 @discardableResult
-func sh(_ path: String, _ args: [String], stdin: String? = nil) -> (code: Int32, out: String, err: String) {
+func sh(_ path: String, _ args: [String], stdin: String? = nil,
+        env extra: [String: String] = [:]) -> (code: Int32, out: String, err: String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: path)
     p.arguments = args
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = SEARCH_PATH
+    for (k, v) in extra { env[k] = v }
     p.environment = env
     let outPipe = Pipe(), errPipe = Pipe()
     p.standardOutput = outPipe
@@ -66,7 +74,7 @@ func notifyMac(_ title: String, _ body: String) {
     sh("/usr/bin/osascript", ["-e", "display notification \"\(b)\" with title \"\(t)\" sound name \"Glass\""])
 }
 
-// O merge exige terminal de proposito (confirmacao digitada). Mas o AppleScript
+// Abrir o Terminal e caminho auxiliar, nao o do merge. Mas o AppleScript
 // falha calado quando a permissao de Automacao esta negada — devolvemos o erro
 // para quem chamou em vez de deixar o botao parecer quebrado.
 @discardableResult
@@ -291,6 +299,39 @@ func ultimoProgresso(_ note: String) -> String {
 }
 
 final class Orchestra: ObservableObject {
+    // --- projeto desta janela -------------------------------------------
+    // Cada janela (ou aba) do app tem o seu proprio projeto e a sua propria
+    // sessao tmux. Nada aqui le o project.conf global depois que a janela ja
+    // sabe qual e o dela — e o que impede uma aba de enxergar, tocar ou
+    // derrubar os agentes da outra.
+    private var pinned: String?
+    // Somente a PRIMEIRA janela da sessao adota o ultimo projeto usado, para
+    // voce voltar de onde parou. Janela nova nasce vazia e pede a pasta —
+    // nunca assume ~/orquestra nem herda o projeto da janela ao lado.
+    private let adotaUltimo: Bool
+    private static var primeiraJanela = true
+
+    // o projeto vai para o nvo por variavel de ambiente, chamada a chamada
+    private var nvoEnv: [String: String] {
+        pinned.map { ["NVO_PROJECT": $0] } ?? [:]
+    }
+
+    @discardableResult
+    private func nvo(_ args: [String], stdin: String? = nil) -> (code: Int32, out: String, err: String) {
+        sh(NVO, args, stdin: stdin, env: nvoEnv)
+    }
+
+    // sessao tmux desta janela, derivada do nome da pasta do projeto
+    var session: String {
+        sessionName(pinned.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "sem-projeto")
+    }
+
+    // fixa a janela num projeto (escolha da pessoa ou adocao do ultimo usado)
+    func pin(_ path: String?) {
+        pinned = path
+        objectWillChange.send()
+    }
+
     @Published var project: String?
     @Published var repo: String?
     @Published var agents: [AgentInfo] = []
@@ -422,7 +463,8 @@ final class Orchestra: ObservableObject {
     // um harness novo e editar um arquivo de texto, sem tocar no app.
     func refreshHarnesses() {
         DispatchQueue.global().async { [weak self] in
-            let r = sh(NVO, ["harnesses"])
+            guard let self = self else { return }
+            let r = self.nvo(["harnesses"])
             guard r.code == 0 else { return }
             let lista: [Harness] = r.out.split(separator: "\n").compactMap { linha in
                 let c = linha.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
@@ -432,15 +474,16 @@ final class Orchestra: ObservableObject {
                                install: c[4])
             }
             DispatchQueue.main.async {
-                self?.harnesses = lista
-                self?.codexInstalled = lista.contains { $0.id == "codex" && $0.installed }
+                self.harnesses = lista
+                self.codexInstalled = lista.contains { $0.id == "codex" && $0.installed }
             }
         }
     }
 
     func refreshConfig() {
         DispatchQueue.global().async { [weak self] in
-            let r = sh(NVO, ["config"])
+            guard let self = self else { return }
+            let r = self.nvo(["config"])
             guard r.code == 0 else { return }
             let lista: [Limite] = r.out.split(separator: "\n").compactMap { linha in
                 let c = linha.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
@@ -448,23 +491,26 @@ final class Orchestra: ObservableObject {
                 else { return nil }
                 return Limite(key: c[0], value: v, min: mn, max: mx, label: c[4], help: c[5])
             }
-            DispatchQueue.main.async { self?.limites = lista }
+            DispatchQueue.main.async { self.limites = lista }
         }
     }
 
     func setLimite(_ key: String, _ value: Int) {
         DispatchQueue.global().async { [weak self] in
-            let r = sh(NVO, ["config", key, "\(value)"])
+            guard let self = self else { return }
+            let r = self.nvo(["config", key, "\(value)"])
             DispatchQueue.main.async {
                 if r.code != 0 {
-                    self?.lastError = (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.lastError = (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
                 }
-                self?.refreshConfig()
+                self.refreshConfig()
             }
         }
     }
 
     init() {
+        adotaUltimo = Orchestra.primeiraJanela
+        Orchestra.primeiraJanela = false
         refreshHarnesses()
         refreshConfig()
         refresh()
@@ -502,8 +548,9 @@ final class Orchestra: ObservableObject {
     }
 
     func ensureSession() {
-        if sh(TMUX, ["has-session", "-t", SESSION]).code != 0 {
-            sh(TMUX, ["new-session", "-d", "-s", SESSION, "-n", "maestro", "-c", ORQ])
+        guard let repo = pinned else { return }   // sem projeto nao ha sessao
+        if sh(TMUX, ["has-session", "-t", session]).code != 0 {
+            sh(TMUX, ["new-session", "-d", "-s", session, "-n", "maestro", "-c", repo])
         }
     }
 
@@ -531,7 +578,7 @@ final class Orchestra: ObservableObject {
     static let shellCommands: Set<String> = ["zsh", "bash", "sh", "fish", "login", "tmux", "dash", "ksh"]
 
     func windowBusy(_ window: String) -> Bool {
-        let r = sh(TMUX, ["list-panes", "-t", "\(SESSION):\(window)", "-F", "#{pane_current_command}"])
+        let r = sh(TMUX, ["list-panes", "-t", "\(session):\(window)", "-F", "#{pane_current_command}"])
         guard r.code == 0 else { return false }
         return r.out.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -558,7 +605,7 @@ final class Orchestra: ObservableObject {
     }
 
     func pane(_ window: String, lines: Int = 40) -> String? {
-        let r = sh(TMUX, ["capture-pane", "-pt", "\(SESSION):\(window)", "-S", "-200"])
+        let r = sh(TMUX, ["capture-pane", "-pt", "\(session):\(window)", "-S", "-200"])
         guard r.code == 0 else { return nil }
         let all = r.out.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -569,9 +616,19 @@ final class Orchestra: ObservableObject {
     func refresh() {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            let conf = "\(ORQ)/project.conf"
-            let repo = (try? String(contentsOfFile: conf, encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            var repo = self.pinned
+            if repo == nil, self.adotaUltimo {
+                // primeira janela: retoma o ultimo projeto e se fixa nele
+                let conf = "\(ORQ)/project.conf"
+                repo = (try? String(contentsOfFile: conf, encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if let r = repo, !r.isEmpty, FileManager.default.fileExists(atPath: r) {
+                    self.pinned = r
+                    DispatchQueue.main.async { self.objectWillChange.send() }
+                } else {
+                    repo = nil
+                }
+            }
             let proj = repo.map { URL(fileURLWithPath: $0).lastPathComponent }
             self.ensureSession()
 
@@ -682,7 +739,7 @@ final class Orchestra: ObservableObject {
         DispatchQueue.global().async {
             var args = ["maestro", "claude"]
             if !model.isEmpty { args.append(model) }
-            let r = sh(NVO, args)
+            let r = self.nvo(args)
             if r.code != 0 {
                 DispatchQueue.main.async { self.lastError = (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines) }
             }
@@ -691,30 +748,30 @@ final class Orchestra: ObservableObject {
 
     func sendKey(_ window: String, _ key: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(SESSION):\(window)", key])
+        sh(TMUX, ["send-keys", "-t", "\(session):\(window)", key])
     }
 
     func sendLiteral(_ window: String, _ text: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(SESSION):\(window)", "-l", text])
+        sh(TMUX, ["send-keys", "-t", "\(session):\(window)", "-l", text])
     }
 
     func approvePlan(_ name: String) {
         DispatchQueue.global().async {
-            sh(NVO, ["approve", name])
+            self.nvo(["approve", name])
             DispatchQueue.main.async { self.refresh() }
         }
     }
 
     func sendMaestro(_ text: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(SESSION):maestro", "-l", text])
+        sh(TMUX, ["send-keys", "-t", "\(session):maestro", "-l", text])
         usleep(300_000)
-        sh(TMUX, ["send-keys", "-t", "\(SESSION):maestro", "Enter"])
+        sh(TMUX, ["send-keys", "-t", "\(session):maestro", "Enter"])
     }
 
     func sendAgent(_ name: String, _ text: String) {
-        let r = sh(NVO, ["send", name, text])
+        let r = self.nvo(["send", name, text])
         if r.code != 0 { DispatchQueue.main.async { self.lastError = r.err } }
     }
 
@@ -726,7 +783,7 @@ final class Orchestra: ObservableObject {
             if plan { args.append("--plan") }
             args += [name, task, cli]
             if !model.isEmpty { args.append(model) }
-            let r = sh(NVO, args)
+            let r = self.nvo(args)
             DispatchQueue.main.async {
                 done(r.code == 0 ? nil : (r.err.isEmpty ? r.out : r.err))
                 self.refresh()
@@ -734,11 +791,11 @@ final class Orchestra: ObservableObject {
         }
     }
 
-    // Merge sem sair do app. A confirmacao digitada continua obrigatoria — ela
-    // viaja como argumento e o nvo recusa se nao bater com o nome do agente.
+    // Merge sem sair do app. A confirmacao viaja como argumento do --confirm; no
+    // terminal o nvo continua pedindo o nome quando ninguem passa a flag.
     func doneAgent(_ name: String, confirm: String, done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            let r = sh(NVO, ["done", name, "--confirm", confirm])
+            let r = self.nvo(["done", name, "--confirm", confirm])
             let saida = (r.err + "\n" + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async {
                 done(r.code == 0 ? nil : (saida.isEmpty ? "o merge falhou (código \(r.code))" : saida))
@@ -750,7 +807,7 @@ final class Orchestra: ObservableObject {
     // Fecha o expediente: derruba maestro e agentes, preserva o trabalho no disco.
     func stopSession(keepProject: Bool, done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            let r = sh(NVO, keepProject ? ["stop"] : ["stop", "--forget-project"])
+            let r = self.nvo(keepProject ? ["stop"] : ["stop", "--forget-project"])
             let saida = (r.err + "\n" + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async {
                 done(r.code == 0 ? nil : (saida.isEmpty ? "não consegui encerrar a sessão" : saida))
@@ -761,7 +818,7 @@ final class Orchestra: ObservableObject {
 
     func killAgent(_ name: String, done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            let r = sh(NVO, ["kill", name])
+            let r = self.nvo(["kill", name])
             DispatchQueue.main.async {
                 done(r.code == 0 ? nil : r.err)
                 self.refresh()
@@ -771,15 +828,19 @@ final class Orchestra: ObservableObject {
 
     func diff(_ name: String, done: @escaping (String) -> Void) {
         DispatchQueue.global().async {
-            let r = sh(NVO, ["diff", name])
+            let r = self.nvo(["diff", name])
             DispatchQueue.main.async { done(r.code == 0 ? (r.out.isEmpty ? "(sem mudanças)" : r.out) : r.err) }
         }
     }
 
     func initProject(_ path: String, done: @escaping (String?) -> Void) {
         DispatchQueue.global().async {
-            let r = sh(NVO, ["init", path])
-            DispatchQueue.main.async { done(r.code == 0 ? nil : r.err); self.refresh() }
+            let r = self.nvo(["init", path])
+            DispatchQueue.main.async {
+                if r.code == 0 { self.pin(path) }
+                done(r.code == 0 ? nil : r.err)
+                self.refresh()
+            }
         }
     }
 
@@ -801,8 +862,12 @@ final class Orchestra: ObservableObject {
             if FileManager.default.fileExists(atPath: dest) {
                 // ja clonado antes: so atualiza e registra
                 sh(GIT, ["-C", dest, "pull", "--ff-only"])
-                let r = sh(NVO, ["init", dest])
-                DispatchQueue.main.async { done(r.code == 0 ? nil : r.err); self.refresh() }
+                let r = self.nvo(["init", dest])
+                DispatchQueue.main.async {
+                    if r.code == 0 { self.pin(dest) }
+                    done(r.code == 0 ? nil : r.err)
+                    self.refresh()
+                }
                 return
             }
             try? FileManager.default.createDirectory(atPath: "\(ORQ)/repos",
@@ -812,8 +877,12 @@ final class Orchestra: ObservableObject {
                 DispatchQueue.main.async { done("falha no clone: \(r.err.suffix(300))") }
                 return
             }
-            let r2 = sh(NVO, ["init", dest])
-            DispatchQueue.main.async { done(r2.code == 0 ? nil : r2.err); self.refresh() }
+            let r2 = self.nvo(["init", dest])
+            DispatchQueue.main.async {
+                if r2.code == 0 { self.pin(dest) }
+                done(r2.code == 0 ? nil : r2.err)
+                self.refresh()
+            }
         }
     }
 
@@ -831,8 +900,12 @@ final class Orchestra: ObservableObject {
                 DispatchQueue.main.async { done(r.err) }
                 return
             }
-            let r2 = sh(NVO, ["init", path])
-            DispatchQueue.main.async { done(r2.code == 0 ? nil : r2.err); self.refresh() }
+            let r2 = self.nvo(["init", path])
+            DispatchQueue.main.async {
+                if r2.code == 0 { self.pin(path) }
+                done(r2.code == 0 ? nil : r2.err)
+                self.refresh()
+            }
         }
     }
 }
@@ -2409,7 +2482,7 @@ struct AjustesView: View {
                                     Text("modo liberdade — concordar com tudo")
                                         .font(.system(size: Theme.uiSize(11), weight: .semibold))
                                         .foregroundColor(Theme.text)
-                                    Text("quando um agente pedir permissão, o orquestra responde “sim” sozinho, para todos. O firewall (guard.sh) continua bloqueando comandos destrutivos, e aplicar trabalho no projeto continua exigindo a sua confirmação digitada.")
+                                    Text("quando um agente pedir permissão no meio do trabalho, o orquestra responde “sim” sozinho, para todos. Isto NÃO aprova o trabalho pronto: aplicar no projeto continua sendo você, no botão “aprovar” do card. O firewall (guard.sh) continua bloqueando comandos destrutivos.")
                                         .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
@@ -2573,15 +2646,13 @@ struct SheetTarget: Identifiable {
     let kind: Kind
 }
 
-// Aprovar sem sair do app: o diff na tela e o nome digitado logo abaixo dele.
-// Nenhum merge acontece por um clique so — a regra 6 do SPEC continua valendo,
-// muda apenas o lugar onde o humano confirma.
+// Aprovar sem sair do app: o diff na tela e um botao. Nenhum merge acontece
+// sozinho — a decisao continua humana, mas custa um clique, nao um ditado.
 struct DoneSheet: View {
     let name: String
     let orch: Orchestra
     @Environment(\.dismiss) var dismiss
     @State private var diff = "carregando o diff…"
-    @State private var confirm = ""
     @State private var error: String?
     @State private var merging = false
 
@@ -2601,17 +2672,6 @@ struct DoneSheet: View {
 
             TerminalText(content: diff, size: 10.5)
 
-            HStack(spacing: 8) {
-                Text("digite \(name) para confirmar:")
-                    .font(.system(size: Theme.uiSize(10), design: .monospaced))
-                    .foregroundColor(Theme.dim)
-                TextField(name, text: $confirm)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: Theme.uiSize(12), design: .monospaced))
-                    .frame(width: 160)
-                    .disabled(merging)
-                    .onSubmit { aplicar() }
-            }
             if let e = error {
                 Text(e).font(.system(size: Theme.uiSize(10), design: .monospaced))
                     .foregroundColor(AgentStatus.bloqueado.color)
@@ -2623,10 +2683,8 @@ struct DoneSheet: View {
                 SmallButton(label: "cancelar") { dismiss() }
                 SmallButton(label: merging ? "aplicando…" : "aplicar no projeto",
                             icon: "checkmark.seal",
-                            tint: confirm == name ? AgentStatus.concluido.color : Theme.dim,
-                            help: confirm == name
-                                ? "faz o merge de agent/\(name)"
-                                : "digite \(name) no campo acima para liberar",
+                            tint: AgentStatus.concluido.color,
+                            help: "faz o merge de agent/\(name) no projeto",
                             action: aplicar)
             }
         }
@@ -2638,15 +2696,12 @@ struct DoneSheet: View {
 
     private func aplicar() {
         guard !merging else { return }
-        guard confirm == name else {
-            error = confirm.isEmpty
-                ? "digite \(name) no campo acima para confirmar."
-                : "o nome não confere — digite exatamente: \(name)"
-            return
-        }
         error = nil
         merging = true
-        orch.doneAgent(name, confirm: confirm) { err in
+        // O clique no botao E a confirmacao: o diff esta na tela logo acima.
+        // O nome vai para o --confirm do nvo, que continua exigindo o valor
+        // exato; quem digita, na interface grafica, e o app.
+        orch.doneAgent(name, confirm: name) { err in
             merging = false
             if let err = err { error = err } else { dismiss() }
         }
@@ -2958,7 +3013,15 @@ struct InitSheet: View {
                     panel.canChooseDirectories = true
                     panel.canChooseFiles = false
                     panel.prompt = "Usar esta pasta"
+                    panel.message = "Escolha a pasta do projeto em que os agentes vão trabalhar"
+                    // o painel do macOS reabre na ultima pasta que o APP visitou,
+                    // que era o ~/orquestra — aqui ele comeca onde voce guarda os
+                    // seus projetos, ou na sua pasta pessoal na primeira vez
+                    let ultima = UserDefaults.standard.string(forKey: "ultimaPastaDeProjeto")
+                    panel.directoryURL = URL(fileURLWithPath: ultima ?? NSHomeDirectory())
                     if panel.runModal() == .OK, let url = panel.url {
+                        UserDefaults.standard.set(url.deletingLastPathComponent().path,
+                                                  forKey: "ultimaPastaDeProjeto")
                         path = url.path
                         error = nil
                         offerGitInit = !orch.isGitRepo(url.path)
@@ -3027,7 +3090,7 @@ struct HelpView: View {
                     row("person.3.fill", "3 · Acompanhe os agentes",
                         "Cada card mostra a tela ao vivo. Você recebe notificação do macOS quando alguém termina ou trava.")
                     row("checkmark.seal", "4 · Revise e aprove",
-                        "Terminou? Clique em diff pra ver o trabalho e em aprovar pra aplicar no projeto. A confirmação final é digitada no Terminal — merge nunca é automático.")
+                        "Terminou? Clique em diff pra ver o trabalho e em aprovar pra aplicar no projeto. Nada é aplicado sem esse clique — merge nunca é automático.")
 
                     Divider().background(Theme.cardBorder)
                     Text("OS STATUS").font(.system(size: Theme.uiSize(9), weight: .black)).foregroundColor(Theme.accent)
@@ -3060,7 +3123,7 @@ struct HelpView: View {
                     row("questionmark.circle", "Um agente travou, e agora?",
                         "Leia as notas dele (botão notas), destrave mandando uma instrução no campo do card — ou descarte e crie outro com uma tarefa mais específica.")
                     row("questionmark.circle", "Preciso saber git ou terminal?",
-                        "Quase nada: o único momento de terminal é a confirmação do aprovar, que já abre pronto — você só digita o nome do agente.")
+                        "Nada. É tudo dentro do app: ver o diff e clicar em aprovar. O terminal existe se você quiser, mas nunca é obrigatório.")
 
                     Divider().background(Theme.cardBorder)
                     Text("SOBRE").font(.system(size: Theme.uiSize(9), weight: .black)).foregroundColor(Theme.accent)
@@ -3087,6 +3150,20 @@ struct HelpView: View {
         }
         .frame(maxWidth: .infinity)
         .background(Theme.bg)
+    }
+}
+
+// Da acesso a NSWindow de dentro do SwiftUI: e por aqui que a janela ganha o
+// nome do projeto no titulo e vira aba em vez de janela solta.
+struct WindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+    func makeNSView(context: Context) -> NSView {
+        let v = NSView()
+        DispatchQueue.main.async { if let w = v.window { onWindow(w) } }
+        return v
+    }
+    func updateNSView(_ v: NSView, context: Context) {
+        DispatchQueue.main.async { if let w = v.window { onWindow(w) } }
     }
 }
 
@@ -3526,6 +3603,22 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showNew) { NewAgentSheet(orch: orch) }
         .sheet(isPresented: $showInit) { InitSheet(orch: orch) }
+        // o titulo diz de qual projeto e esta janela — com varias abertas,
+        // e o unico jeito de saber onde voce esta antes de clicar
+        .background(WindowAccessor { w in
+            w.title = orch.project.map { "Orquestra — \($0)" } ?? "Orquestra"
+            w.tabbingMode = .preferred
+            w.tabbingIdentifier = "orquestra"
+        })
+        // janela sem projeto ja abre pedindo a pasta, em vez de mostrar um
+        // painel vazio que nao explica o que fazer
+        .onAppear {
+            if orch.project == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    if orch.project == nil { showInit = true }
+                }
+            }
+        }
     }
 }
 

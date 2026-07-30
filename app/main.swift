@@ -390,6 +390,17 @@ final class Orchestra: ObservableObject {
     // avisos visuais na tela; o notifyMac do macOS continua, mas nao adianta
     // quando o app esta na frente e a notificacao passa batida no canto
     @Published var eventos: [Evento] = []
+    // Este app se recompila enquanto voce o usa: os agentes mexem no proprio
+    // codigo dele. Sem este aviso, voce fica olhando uma tela que ja esta
+    // consertada no disco e nao na memoria — o erro custou uma sessao inteira.
+    @Published var versaoNovaNoDisco = false
+    private let binarioAoAbrir = Orchestra.dataDoBinario()
+
+    static func dataDoBinario() -> Date? {
+        guard let exe = Bundle.main.executableURL else { return nil }
+        return (try? FileManager.default.attributesOfItem(atPath: exe.path))?[.modificationDate] as? Date
+    }
+
     // o quadro pulsa quando o maestro reescreve algo que voce ainda nao leu
     @Published var quadroNaoLido = false
     private var quadroVisto = ""
@@ -791,6 +802,13 @@ final class Orchestra: ObservableObject {
                 self.agents = list
                 self.maestroPane = maestro
                 self.maestroRunning = running
+                if let antes = self.binarioAoAbrir, let agora = Orchestra.dataDoBinario(),
+                   agora > antes, !self.versaoNovaNoDisco {
+                    self.versaoNovaNoDisco = true
+                    self.avisar("versão nova do painel compilada",
+                                "feche e reabra (⌘Q) para as correções valerem",
+                                icone: "arrow.triangle.2.circlepath", cor: Theme.accent)
+                }
                 if quadro != self.quadro {
                     self.quadro = quadro
                     let comConteudo = !quadro.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -976,6 +994,17 @@ final class Orchestra: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    // Fecha e abre de novo. Os agentes vivem no tmux, entao nada e perdido —
+    // o painel e so uma janela para o que continua rodando por baixo.
+    func reabrirApp() {
+        let caminho = Bundle.main.bundleURL.path
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; open '\(caminho)'"]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 
     func isGitRepo(_ path: String) -> Bool {
@@ -3589,6 +3618,24 @@ struct ContentView: View {
                         .foregroundColor(Theme.dim).lineLimit(1)
                 }
                 Spacer()
+                // Fica ate voce reabrir. O aviso flutuante some sozinho, e este
+                // e o caso em que sumir e o pior comportamento possivel: voce
+                // segue depurando uma tela que ja esta consertada no disco.
+                if orch.versaoNovaNoDisco {
+                    Button { orch.reabrirApp() } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: Theme.uiSize(9)))
+                            Text("versão nova — reabrir")
+                                .font(.system(size: Theme.uiSize(9), weight: .semibold))
+                        }
+                        .foregroundColor(Theme.bg)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(AgentStatus.concluido.color).cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("o painel foi recompilado depois que esta janela abriu. Clique para fechar e abrir de novo — o que está na tela agora é a versão antiga.")
+                }
                 // liberdade ligada tem que ficar a vista o tempo todo: e o modo
                 // em que os agentes decidem sozinhos
                 if orch.autoYes {

@@ -581,6 +581,9 @@ final class Orchestra: ObservableObject {
                 }
                 self.repo = repo
                 self.project = proj
+                // agente novo ganha uma vaga livre antes de ser desenhado,
+                // para nunca nascer em cima de um card que voce posicionou
+                AgentLayout.shared.ensurePlaced(list.map { $0.name })
                 self.agents = list
                 self.maestroPane = maestro
                 self.maestroRunning = running
@@ -1609,6 +1612,51 @@ final class AgentLayout: ObservableObject {
 
     func box(_ name: String, index: Int) -> Box {
         boxes[name] ?? slot(index)
+    }
+
+    private static func colide(_ a: Box, _ b: Box) -> Bool {
+        let folga: CGFloat = 12
+        return a.x < b.x + b.w + folga && b.x < a.x + a.w + folga
+            && a.y < b.y + b.h + folga && b.y < a.y + a.h + folga
+    }
+
+    // Da posicao a agentes novos procurando a primeira vaga LIVRE — nunca em
+    // cima de um card existente, nem do maestro ou do quadro. A posicao e
+    // gravada na hora, entao e estavel: um agente novo (que pode entrar no
+    // meio da ordem alfabetica) nao desloca mais ninguem.
+    func ensurePlaced(_ names: [String]) {
+        let novos = names.filter { boxes[$0] == nil }
+        guard !novos.isEmpty else { return }
+
+        var ocupados: [Box] = [maestroBox, quadroBox]
+        for n in names { if let b = boxes[n] { ocupados.append(b) } }
+
+        let m = maestroBox
+        let clusterW = CGFloat(Self.cols) * Self.defW + CGFloat(Self.cols - 1) * Self.gap
+        let left = max(0, m.x + m.w / 2 - clusterW / 2)
+        let top = m.y + m.h + 96
+
+        for nome in novos.sorted() {
+            var vaga: Box?
+            var row = 0
+            while vaga == nil && row < 60 {
+                for col in 0..<Self.cols {
+                    let cand = Box(x: left + CGFloat(col) * (Self.defW + Self.gap),
+                                   y: top + CGFloat(row) * (Self.defH + Self.gap),
+                                   w: Self.defW, h: Self.defH)
+                    if !ocupados.contains(where: { Self.colide($0, cand) }) {
+                        vaga = cand
+                        break
+                    }
+                }
+                row += 1
+            }
+            let b = vaga ?? Box(x: left, y: top + CGFloat(row) * (Self.defH + Self.gap),
+                                w: Self.defW, h: Self.defH)
+            boxes[nome] = b
+            ocupados.append(b)
+        }
+        persist()
     }
 
     func move(_ name: String, index: Int, by d: CGSize) {

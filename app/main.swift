@@ -484,6 +484,10 @@ final class Orchestra: ObservableObject {
         return (try? FileManager.default.attributesOfItem(atPath: exe.path))?[.modificationDate] as? Date
     }
 
+    // vira true quando a primeira leitura do disco termina. Antes disso a
+    // janela nao sabe se tem projeto ou nao — e perguntar no escuro faz o
+    // seletor de pasta pular na frente de um painel que ja estava carregando.
+    @Published var primeiraLeituraFeita = false
     // o quadro pulsa quando o maestro reescreve algo que voce ainda nao leu
     @Published var quadroNaoLido = false
     private var quadroVisto = ""
@@ -924,6 +928,7 @@ final class Orchestra: ObservableObject {
                 }
                 self.nomesConhecidos = nomes
                 self.primeiroCiclo = false
+                self.primeiraLeituraFeita = true
                 self.repo = repo
                 self.project = proj
                 // agente novo ganha uma vaga livre antes de ser desenhado,
@@ -4488,14 +4493,15 @@ struct ContentView: View {
             w.tabbingMode = .preferred
             w.tabbingIdentifier = "orquestra"
         })
-        // janela sem projeto ja abre pedindo a pasta, em vez de mostrar um
-        // painel vazio que nao explica o que fazer
-        .onAppear {
-            if orch.project == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    if orch.project == nil { showInit = true }
-                }
-            }
+        // Janela sem projeto abre pedindo a pasta — mas so DEPOIS de ler o
+        // disco. Perguntar por tempo ("espera meio segundo") fazia o seletor
+        // pular na frente de um painel que estava carregando normalmente.
+        .onChange(of: orch.primeiraLeituraFeita) { pronto in
+            if pronto, orch.project == nil { showInit = true }
+        }
+        // e se o projeto aparecer com o seletor aberto, ele sai da frente
+        .onChange(of: orch.project) { p in
+            if p != nil { showInit = false }
         }
     }
 }

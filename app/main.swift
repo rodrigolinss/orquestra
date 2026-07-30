@@ -113,8 +113,11 @@ struct PanePrompt {
 
     init(pane: String) {
         let tail = String(pane.suffix(1500))
+        // so as ultimas linhas: um prompt de verdade fica desenhado no rodape
+        // do painel, nao espalhado pelo texto que ja rolou
+        let ultimasLinhas = tail.split(separator: "\n", omittingEmptySubsequences: false).suffix(12)
         var found: [(String, String)] = []
-        for raw in tail.split(separator: "\n") {
+        for raw in ultimasLinhas {
             let line = raw.trimmingCharacters(in: CharacterSet(charactersIn: " \t❯>│|"))
             guard let first = line.first, first.isNumber,
                   line.count > 3 else { continue }
@@ -127,8 +130,16 @@ struct PanePrompt {
             if label.count > 46 { label = String(label.prefix(44)) + "…" }
             if !found.contains(where: { $0.0 == key }) { found.append((key, label)) }
         }
-        // exige pelo menos duas opcoes para nao confundir com lista comum
-        self.options = found.count >= 2 ? Array(found.prefix(4)) : []
+        // exige pelo menos duas opcoes, numeradas em sequencia comecando em 1
+        // (1, 2, 3...) — e nao dígitos soltos de uma lista em prosa
+        let sequencial = found.count >= 2
+            && found.enumerated().allSatisfy { i, o in o.0 == String(i + 1) }
+        // e um marcador do proprio prompt de selecao do Claude Code por perto,
+        // pra nao confundir um plano numerado (do maestro ou nas notas) com
+        // uma pergunta de permissao de verdade
+        let temMarcador = ["do you want", "❯", "esc to cancel", "(y/n)"]
+            .contains { tail.lowercased().contains($0) }
+        self.options = (sequencial && temMarcador) ? Array(found.prefix(4)) : []
     }
 }
 
@@ -385,7 +396,9 @@ final class Orchestra: ObservableObject {
     // resposta" (assinatura nova), nunca a cada ciclo. No modo liberdade,
     // responde "1" — a opcao afirmativa padrao do Claude Code — com trava de
     // 8s por assinatura para nao mandar "1" duas vezes enquanto a tela atualiza.
-    private func processarPrompt(janela: String, pane: String) {
+    // autoResponder = false no maestro: ele e uma conversa com o humano, nunca
+    // deve levar tecla digitada sozinha — so o aviso sonoro pode continuar.
+    private func processarPrompt(janela: String, pane: String, autoResponder: Bool) {
         let p = PanePrompt(pane: pane)
         guard p.isAsking else {
             lastPromptSig[janela] = nil
@@ -395,7 +408,7 @@ final class Orchestra: ObservableObject {
         let novo = lastPromptSig[janela] != sig
         lastPromptSig[janela] = sig
 
-        if autoYes {
+        if autoYes && autoResponder {
             let agora = Date()
             if let ultima = lastAutoAnswer[sig], agora.timeIntervalSince(ultima) < 8 { return }
             lastAutoAnswer[sig] = agora
@@ -651,8 +664,8 @@ final class Orchestra: ObservableObject {
                     self.avisouEsgotado = false
                 }
                 // aviso sonoro / modo liberdade: maestro e todos os agentes
-                self.processarPrompt(janela: "maestro", pane: maestro)
-                for a in list { self.processarPrompt(janela: a.name, pane: a.pane) }
+                self.processarPrompt(janela: "maestro", pane: maestro, autoResponder: false)
+                for a in list { self.processarPrompt(janela: a.name, pane: a.pane, autoResponder: true) }
                 // ciclo fechado: quando a EQUIPE INTEIRA conclui, o maestro e
                 // avisado uma unica vez e decide os proximos passos sozinho
                 let allDone = !list.isEmpty && list.allSatisfy { $0.status == .concluido }
@@ -3160,7 +3173,7 @@ struct ContentView: View {
                         .background(Theme.accent).cornerRadius(4)
                     }
                     .buttonStyle(.plain)
-                    .help("modo liberdade ativo: os agentes recebem “sim” automático. Clique para ajustar.")
+                    .help("modo liberdade ativo: os agentes recebem “sim” automático. O maestro não é respondido sozinho — é a pessoa quem decide o que ele pergunta. Clique para ajustar.")
                 }
                 // zoom da interface — tipografia pequena era reclamacao legitima
                 HStack(spacing: 2) {

@@ -1636,23 +1636,33 @@ final class AgentLayout: ObservableObject {
         let left = max(0, m.x + m.w / 2 - clusterW / 2)
         let top = m.y + m.h + 96
 
+        // ponto ideal: centro da primeira vaga sob o maestro
+        let alvo = CGPoint(x: left + Self.defW / 2, y: top + Self.defH / 2)
+
         for nome in novos.sorted() {
-            var vaga: Box?
-            var row = 0
-            while vaga == nil && row < 60 {
-                for col in 0..<Self.cols {
+            // varre uma grade larga (pra esquerda, direita e abaixo) e escolhe a
+            // vaga LIVRE mais proxima do alvo — assim o card novo aparece perto
+            // da equipe mesmo que voce tenha espalhado tudo pelos lados
+            var melhor: (Box, CGFloat)?
+            for row in 0..<40 {
+                for col in -4...6 {
                     let cand = Box(x: left + CGFloat(col) * (Self.defW + Self.gap),
                                    y: top + CGFloat(row) * (Self.defH + Self.gap),
                                    w: Self.defW, h: Self.defH)
-                    if !ocupados.contains(where: { Self.colide($0, cand) }) {
-                        vaga = cand
-                        break
-                    }
+                    guard cand.x >= 0, cand.y >= 0 else { continue }
+                    guard !ocupados.contains(where: { Self.colide($0, cand) }) else { continue }
+                    let dx = cand.x + cand.w / 2 - alvo.x
+                    let dy = cand.y + cand.h / 2 - alvo.y
+                    let d = (dx * dx + dy * dy).squareRoot()
+                    if melhor == nil || d < melhor!.1 { melhor = (cand, d) }
                 }
-                row += 1
+                // achou algo nesta faixa e a proxima faixa ja seria mais longe
+                if let m = melhor, m.1 < CGFloat(row + 1) * (Self.defH + Self.gap) { break }
             }
-            let b = vaga ?? Box(x: left, y: top + CGFloat(row) * (Self.defH + Self.gap),
-                                w: Self.defW, h: Self.defH)
+            // fallback: abaixo de tudo que existe (garante zero sobreposicao)
+            let b = melhor?.0 ?? Box(x: left,
+                                     y: (ocupados.map { $0.y + $0.h }.max() ?? top) + Self.gap,
+                                     w: Self.defW, h: Self.defH)
             boxes[nome] = b
             ocupados.append(b)
         }

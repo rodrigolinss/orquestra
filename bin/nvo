@@ -58,6 +58,8 @@ config_spec() {
     max_depth)  echo "1|4|camadas de delegação|Quantos níveis abaixo do maestro. Cada camada afasta o trabalho de quem pediu: acima de 3 o pedido chega distorcido, porque cada nível reescreve a tarefa com as próprias palavras." ;;
     max_fanout) echo "1|8|subagentes por agente|Quantos filhos cada agente pode criar. Acima de 4 o pai gasta mais token coordenando do que o trabalho economiza." ;;
     max_agents) echo "1|24|agentes vivos ao mesmo tempo|Teto somando todas as camadas. Cada agente ativo consome contexto e janela de uso — 12 é confortável no plano Max; acima de 16 a janela de 5h costuma estourar." ;;
+    # min vazio marca "texto livre" (nao numerico) para cmd_config
+    verify) echo "|-|comando de verificação|Comando que 'nvo check' roda dentro da copia do agente. Vazio: nvo tenta descobrir pelo repositorio (package.json, pytest, Makefile, Cargo.toml, go.mod, app/build.sh)." ;;
     *) return 1 ;;
   esac
 }
@@ -67,7 +69,7 @@ config_spec() {
 cmd_config() {
   local chave valor spec min max rotulo ajuda
   if [ $# -eq 0 ]; then
-    for chave in max_depth max_fanout max_agents; do
+    for chave in max_depth max_fanout max_agents verify; do
       spec="$(config_spec "$chave")"
       IFS='|' read -r min max rotulo ajuda <<EOF
 $spec
@@ -76,6 +78,7 @@ EOF
         max_depth)  valor="$NVO_MAX_DEPTH" ;;
         max_fanout) valor="$NVO_MAX_FANOUT" ;;
         max_agents) valor="$NVO_MAX_AGENTS" ;;
+        verify)     valor="$(config_get verify "")" ;;
       esac
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$chave" "$valor" "$min" "$max" "$rotulo" "$ajuda"
     done
@@ -84,13 +87,15 @@ EOF
 
   [ $# -eq 2 ] || die "uso: nvo config [<chave> <valor>]"
   chave="$1"; valor="$2"
-  spec="$(config_spec "$chave")" || die "chave desconhecida '$chave' (use: max_depth, max_fanout, max_agents)"
+  spec="$(config_spec "$chave")" || die "chave desconhecida '$chave' (use: max_depth, max_fanout, max_agents, verify)"
   IFS='|' read -r min max rotulo ajuda <<EOF
 $spec
 EOF
-  printf '%s' "$valor" | grep -Eq '^[0-9]+$' || die "'$valor' nao e um numero inteiro"
-  [ "$valor" -ge "$min" ] && [ "$valor" -le "$max" ] \
-    || die "$chave aceita de $min a $max (recebi $valor)"
+  if [ -n "$min" ]; then
+    printf '%s' "$valor" | grep -Eq '^[0-9]+$' || die "'$valor' nao e um numero inteiro"
+    [ "$valor" -ge "$min" ] && [ "$valor" -le "$max" ] \
+      || die "$chave aceita de $min a $max (recebi $valor)"
+  fi
 
   touch "$CONFIG"
   if grep -q "^$chave=" "$CONFIG" 2>/dev/null; then
@@ -165,6 +170,10 @@ nvo — orquestrador local de agentes Claude Code
   nvo note <nome>              imprime as notas do agente
   nvo diff <nome>              diff da branch do agente contra a base
   nvo explain <nome>           explica o diff em portugues simples (harness barato)
+  nvo check <nome> [seg]       roda os testes do projeto na copia do agente
+                               (nao bloqueia; so registra evidencia no .meta)
+  nvo collisions               avisa quais agentes vivos mexem no mesmo arquivo
+  nvo status <nome>            situacao do check e colisoes em chave=valor
   nvo done <nome>              mostra diff, pede confirmacao, faz merge --no-ff
   nvo kill <nome>              encerra janela e remove worktree SEM merge
   nvo attach                   entra na sessao tmux deste projeto
@@ -487,6 +496,22 @@ EOF
   echo "  worktree: $wt"
   echo "  notas:    $note"
   echo "  tela:     nvo read $name  |  ao vivo: nvo attach"
+
+  # Aviso, nunca bloqueio: a tarefa cita arquivo que outro agente vivo ja mudou.
+  local dir outro files f
+  for dir in "$WT_ROOT/$PROJ"/*/; do
+    [ -d "$dir" ] || continue
+    outro="$(basename "$dir")"
+    [ "$outro" = "$name" ] && continue
+    files="$(agent_changed_files "$outro" 2>/dev/null || true)"
+    [ -n "$files" ] || continue
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      case "$task" in
+        *"$f"*) echo "  aviso: a tarefa cita '$f', ja mudado por '$outro' (nvo collisions)" ;;
+      esac
+    done <<<"$files"
+  done
 }
 
 # status derivado das notas do agente — o marcador que aparece por ultimo manda
@@ -750,6 +775,7 @@ cmd_ls() {
   [ "$n_done" -gt 0 ] && echo "  → revise: nvo diff <nome>   aprove: nvo done <nome>"
   [ "$n_wait" -gt 0 ] && echo "  → leia o plano: nvo note <nome>   libere: nvo approve <nome>"
   [ "$n_block" -gt 0 ] && echo "  → destrave: nvo note <nome>   responda: nvo send <nome> \"...\""
+  [ -n "$(agent_collisions)" ] && echo "  → agentes mexendo no mesmo arquivo: nvo collisions"
   return 0
 }
 
@@ -785,6 +811,56 @@ get_base() {
   local meta; meta="$(meta_path "$1").meta"
   [ -f "$meta" ] || die "metadados do agente '$1' nao encontrados"
   sed -n 's/^base=//p' "$meta"
+}
+
+# Arquivos que o agente mudou desde que nasceu: merge-base de tres pontos
+# (mesma logica de "nvo diff"), incluindo mudancas nao commitadas no worktree.
+agent_changed_files() {
+  local wt base
+  wt="$(wt_path "$1")"
+  base="$(get_base "$1")"
+  git -C "$wt" diff --name-only "$base"...
+}
+
+# Pares de agentes vivos com arquivo em comum. Uma linha por par:
+# nomeA<TAB>nomeB<TAB>arquivos separados por espaco.
+agent_collisions() {
+  [ -d "$WT_ROOT/$PROJ" ] || return 0
+  local dir names=() i j a b files_a files_b common
+  for dir in "$WT_ROOT/$PROJ"/*/; do
+    [ -d "$dir" ] || continue
+    names+=("$(basename "$dir")")
+  done
+  for ((i = 0; i < ${#names[@]}; i++)); do
+    a="${names[$i]}"
+    files_a="$(agent_changed_files "$a")"
+    [ -n "$files_a" ] || continue
+    for ((j = i + 1; j < ${#names[@]}; j++)); do
+      b="${names[$j]}"
+      files_b="$(agent_changed_files "$b")"
+      [ -n "$files_b" ] || continue
+      common="$(comm -12 <(sort <<<"$files_a") <(sort <<<"$files_b"))"
+      [ -n "$common" ] && printf '%s\t%s\t%s\n' "$a" "$b" "$(tr '\n' ' ' <<<"$common")"
+    done
+  done
+  return 0
+}
+
+# nvo collisions — cruza os arquivos alterados por cada agente vivo. Aviso,
+# nunca bloqueio.
+cmd_collisions() {
+  load_project
+  [ -d "$WT_ROOT/$PROJ" ] || { echo "nenhum agente ativo em $PROJ"; return 0; }
+  local pares a b files
+  pares="$(agent_collisions)"
+  if [ -z "$pares" ]; then
+    echo "sem sobreposicao entre os agentes ativos"
+    return 0
+  fi
+  while IFS=$'\t' read -r a b files; do
+    [ -n "$a" ] || continue
+    echo "colisao: '$a' e '$b' mexem em: $files"
+  done <<<"$pares"
 }
 
 cmd_diff() {
@@ -895,6 +971,111 @@ EOF
   echo "$output"
 }
 
+# Comando de verificacao do projeto: config.conf 'verify' primeiro, senao
+# detecta pelo que existe no repo. Imprime o comando ou falha se nao achar.
+detect_verify_cmd() {
+  local wt="$1" cmd
+  cmd="$(config_get verify "")"
+  [ -n "$cmd" ] && { printf '%s' "$cmd"; return 0; }
+  if [ -f "$wt/package.json" ] && grep -q '"test"[[:space:]]*:' "$wt/package.json" 2>/dev/null; then
+    printf 'npm test'; return 0
+  fi
+  if [ -f "$wt/pytest.ini" ] \
+    || { [ -f "$wt/pyproject.toml" ] && grep -qi pytest "$wt/pyproject.toml" 2>/dev/null; }; then
+    printf 'pytest'; return 0
+  fi
+  if [ -f "$wt/Makefile" ] && grep -Eq '^test:' "$wt/Makefile" 2>/dev/null; then
+    printf 'make test'; return 0
+  fi
+  if [ -f "$wt/Cargo.toml" ]; then
+    printf 'cargo test'; return 0
+  fi
+  if [ -f "$wt/go.mod" ]; then
+    printf 'go test ./...'; return 0
+  fi
+  if [ -f "$wt/app/build.sh" ]; then
+    printf 'bash app/build.sh'; return 0
+  fi
+  return 1
+}
+
+# Roda "$cmd" dentro de "$wt", saida (stdout+stderr) em "$out", com timeout de
+# "$secs" segundos. Sem coreutils (macOS nao tem 'timeout' por padrao): poll
+# de 1s, TERM e depois KILL se estourar. Retorna 124 no timeout, senao o
+# codigo de saida do comando.
+run_with_timeout() {
+  local secs="$1" wt="$2" cmd="$3" out="$4"
+  ( cd "$wt" && eval "$cmd" ) > "$out" 2>&1 &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    if [ "$waited" -ge "$secs" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+  done
+  wait "$pid"
+}
+
+# Grava situacao/comando/horario do ultimo check no .meta do agente.
+set_check_meta() {
+  local meta="$1.meta" status="$2" cmd="$3" quando="$4" tmp
+  tmp="$(mktemp)"
+  grep -v '^check_status=\|^check_cmd=\|^check_time=' "$meta" > "$tmp" 2>/dev/null || true
+  mv "$tmp" "$meta"
+  {
+    printf 'check_status=%s\n' "$status"
+    printf 'check_cmd=%s\n' "$cmd"
+    printf 'check_time=%s\n' "$quando"
+  } >> "$meta"
+}
+
+# nvo check <nome> [timeout_seg] — roda o comando de verificacao do projeto
+# DENTRO do worktree do agente. So informa; nunca bloqueia aprovacao.
+cmd_check() {
+  [ $# -ge 1 ] || die "uso: nvo check <nome> [timeout_seg]"
+  load_project
+  local name="$1" tempo="${2:-300}" wt meta out cmd rc=0 inicio fim dur status
+  agent_exists "$name" || die "agente '$name' nao existe"
+  wt="$(wt_path "$name")"
+  meta="$(meta_path "$name")"
+  out="$meta.check"
+
+  if ! cmd="$(detect_verify_cmd "$wt")"; then
+    echo "nvo: nenhum comando de teste encontrado para '$name' (config.conf 'verify', package.json, pytest, Makefile, Cargo.toml, go.mod, app/build.sh)"
+    set_check_meta "$meta" "sem_teste" "" "$(date '+%Y-%m-%d %H:%M:%S')"
+    return 0
+  fi
+
+  inicio=$(date +%s)
+  run_with_timeout "$tempo" "$wt" "$cmd" "$out.tmp" || rc=$?
+  fim=$(date +%s)
+  dur=$((fim - inicio))
+  tail -n 40 "$out.tmp" > "$out" 2>/dev/null || true
+  rm -f "$out.tmp"
+
+  if [ "$rc" -eq 124 ]; then
+    status=timeout
+  elif [ "$rc" -eq 0 ]; then
+    status=ok
+  else
+    status=falhou
+  fi
+  set_check_meta "$meta" "$status" "$cmd" "$(date '+%Y-%m-%d %H:%M:%S')"
+
+  case "$status" in
+    ok)      echo "check '$name': OK — $cmd (${dur}s)" ;;
+    timeout) echo "check '$name': TIMEOUT apos ${tempo}s — $cmd"
+             echo "  ultimas linhas ($out):"; tail -n 10 "$out" | sed 's/^/  | /' ;;
+    falhou)  echo "check '$name': FALHOU — $cmd (${dur}s)"
+             echo "  ultimas linhas ($out):"; tail -n 10 "$out" | sed 's/^/  | /' ;;
+  esac
+}
+
 cmd_done() {
   local name="" confirm="" have_confirm=0
   while [ $# -gt 0 ]; do
@@ -989,6 +1170,27 @@ cmd_kill() {
   rm -f "$(meta_path "$name").meta" "$(meta_path "$name").prompt"
   echo "agente '$name' encerrado SEM merge. A branch agent/$name foi preservada;"
   echo "para descartar de vez: git -C $REPO branch -D agent/$name"
+}
+
+# nvo status <nome> — saida `chave=valor`, uma por linha, sem cor nem
+# enfeite, para o app consumir: situacao/comando/horario do ultimo "nvo
+# check" e a lista (separada por virgula) de agentes vivos com quem este
+# agente colide em arquivo — vazia quando nao ha colisao.
+cmd_status() {
+  [ $# -eq 1 ] || die "uso: nvo status <nome>"
+  load_project
+  agent_exists "$1" || die "agente '$1' nao existe"
+  local name="$1" meta status cmd_ quando pares colide
+  meta="$(meta_path "$name").meta"
+  status="$(sed -n 's/^check_status=//p' "$meta" 2>/dev/null | tail -1)"
+  cmd_="$(sed -n 's/^check_cmd=//p' "$meta" 2>/dev/null | tail -1)"
+  quando="$(sed -n 's/^check_time=//p' "$meta" 2>/dev/null | tail -1)"
+  pares="$(agent_collisions)"
+  colide="$(awk -F'\t' -v n="$name" '$1==n{print $2} $2==n{print $1}' <<<"$pares" | paste -sd, -)"
+  printf 'check_status=%s\n' "${status:-sem_dado}"
+  printf 'check_cmd=%s\n' "$cmd_"
+  printf 'check_time=%s\n' "$quando"
+  printf 'colide_com=%s\n' "$colide"
 }
 
 cmd_attach() {
@@ -1108,6 +1310,9 @@ case "${1:-}" in
   note)   shift; cmd_note "$@" ;;
   diff)   shift; cmd_diff "$@" ;;
   explain) shift; cmd_explain "$@" ;;
+  check)  shift; cmd_check "$@" ;;
+  collisions) shift; cmd_collisions "$@" ;;
+  status) shift; cmd_status "$@" ;;
   done)   shift; cmd_done "$@" ;;
   kill)   shift; cmd_kill "$@" ;;
   attach)  shift; cmd_attach "$@" ;;

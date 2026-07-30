@@ -303,6 +303,8 @@ final class Orchestra: ObservableObject {
     @Published var limites: [Limite] = []
 
     private var lastStatus: [String: AgentStatus] = [:]
+    private var lastAllDone = false
+    @Published var quadro: String = ""
     private var timer: Timer?
     private var usageTimer: Timer?
 
@@ -349,7 +351,20 @@ final class Orchestra: ObservableObject {
             let agora = Date()
             if let ultima = lastAutoAnswer[sig], agora.timeIntervalSince(ultima) < 8 { return }
             lastAutoAnswer[sig] = agora
-            sendLiteral(janela, "1")
+            // prefere a variante "sim e nao pergunte de novo" (geralmente a 2):
+            // uma resposta cobre as proximas iguais, e o agente flui mais rapido
+            let duradoura = p.options.first(where: { o in
+                let l = o.label.lowercased()
+                return l.contains("don't ask") || l.contains("dont ask")
+                    || l.contains("always") || l.contains("and similar")
+                    || l.contains("allow") || l.contains("nao perguntar")
+                    || l.contains("não perguntar")
+            })?.key
+            let sim = p.options.first(where: {
+                let l = $0.label.lowercased()
+                return l.hasPrefix("yes") || l.hasPrefix("sim")
+            })?.key
+            sendLiteral(janela, duradoura ?? sim ?? "1")
         } else if novo, soundOn {
             Orchestra.somSuave(volume: somVolume)
         }
@@ -550,6 +565,10 @@ final class Orchestra: ObservableObject {
             }
             let maestro = self.pane("maestro", lines: 40) ?? ""
             let running = self.windowBusy("maestro")
+            // quadro do maestro para o humano: linguagem simples, vira card
+            let quadro = proj.flatMap {
+                try? String(contentsOfFile: "\(ORQ)/notes/\($0)/_quadro.md", encoding: .utf8)
+            } ?? ""
 
             DispatchQueue.main.async {
                 for a in list {
@@ -565,9 +584,18 @@ final class Orchestra: ObservableObject {
                 self.agents = list
                 self.maestroPane = maestro
                 self.maestroRunning = running
+                self.quadro = quadro
                 // aviso sonoro / modo liberdade: maestro e todos os agentes
                 self.processarPrompt(janela: "maestro", pane: maestro)
                 for a in list { self.processarPrompt(janela: a.name, pane: a.pane) }
+                // ciclo fechado: quando a EQUIPE INTEIRA conclui, o maestro e
+                // avisado uma unica vez e decide os proximos passos sozinho
+                let allDone = !list.isEmpty && list.allSatisfy { $0.status == .concluido }
+                if allDone && !self.lastAllDone && running {
+                    self.sendMaestro("Todos os agentes concluíram. Leia as notas de cada um (nvo note <nome>), atualize o quadro (_quadro.md) em linguagem simples para o humano, e decida os próximos passos: propor novos agentes, pedir correções, ou me dizer o que está pronto para eu aprovar.")
+                    notifyMac("orquestra", "equipe concluiu — o maestro está consolidando o quadro")
+                }
+                self.lastAllDone = allDone
             }
         }
     }
@@ -1224,6 +1252,99 @@ struct MaestroNode: View {
     }
 }
 
+// Quadro de status: o cartao onde o maestro conta, em linguagem humana, o
+// que a equipe fez, o que mudou e o que espera decisao. Movel e
+// redimensionavel como os outros nos do canvas.
+struct BoardNode: View {
+    @ObservedObject var orch: Orchestra
+    @ObservedObject private var layout = AgentLayout.shared
+    @State private var dragging = false
+    @State private var resizing = false
+    @State private var lastDrag: CGSize = .zero
+    @State private var lastResize: CGSize = .zero
+
+    private var box: AgentLayout.Box { layout.quadroBox }
+    private var active: Bool { dragging || resizing }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: Theme.uiSize(11), weight: .bold))
+                    .foregroundColor(dragging ? Theme.accent : Theme.dim.opacity(0.55))
+                    .padding(.horizontal, 3).padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .help("arraste para mover o quadro · duplo clique volta ao lugar")
+                    .onHover { $0 ? NSCursor.openHand.push() : NSCursor.pop() }
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { v in
+                                layout.moveQuadro(by: CGSize(
+                                    width: (v.translation.width - lastDrag.width) / layout.zoom,
+                                    height: (v.translation.height - lastDrag.height) / layout.zoom))
+                                lastDrag = v.translation
+                                dragging = true
+                            }
+                            .onEnded { _ in lastDrag = .zero; dragging = false }
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            layout.reset(AgentLayout.quadroKey)
+                        }
+                    }
+                Image(systemName: "list.clipboard.fill")
+                    .font(.system(size: Theme.uiSize(10)))
+                    .foregroundColor(Theme.accent)
+                Text("QUADRO").font(.system(size: Theme.uiSize(12), weight: .bold, design: .monospaced))
+                    .foregroundColor(Theme.accent)
+                Text("· o maestro escreve aqui pra você")
+                    .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                Spacer()
+            }
+            .help("resumo em linguagem simples do que a equipe fez, o que mudou e o que espera sua decisão — atualizado pelo maestro")
+            ScrollView {
+                Text(orch.quadro)
+                    .font(.system(size: Theme.uiSize(11)))
+                    .foregroundColor(Theme.text.opacity(0.9))
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+            }
+            .background(Theme.terminalBg.opacity(0.6))
+            .cornerRadius(8)
+        }
+        .padding(12)
+        .frame(width: box.w, height: box.h, alignment: .topLeading)
+        .background(Theme.card)
+        .cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .stroke(active ? Theme.accent.opacity(0.55) : Theme.accent.opacity(0.25), lineWidth: 1))
+        .overlay(alignment: .bottomTrailing) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: Theme.uiSize(8), weight: .bold))
+                .foregroundColor(resizing ? Theme.accent : Theme.dim.opacity(0.5))
+                .padding(6)
+                .contentShape(Rectangle())
+                .help("arraste para redimensionar o quadro")
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                        .onChanged { v in
+                            layout.resizeQuadro(by: CGSize(
+                                width: (v.translation.width - lastResize.width) / layout.zoom,
+                                height: (v.translation.height - lastResize.height) / layout.zoom))
+                            lastResize = v.translation
+                            resizing = true
+                        }
+                        .onEnded { _ in lastResize = .zero; resizing = false }
+                )
+        }
+        .shadow(color: .black.opacity(active ? 0.5 : 0), radius: active ? 16 : 0)
+        .position(x: box.x + box.w / 2, y: box.y + box.h / 2)
+        .zIndex(active ? 10 : 0)
+    }
+}
+
 // Canvas livre: cada card tem posicao e tamanho proprios, em coordenadas
 // absolutas do canvas. Um agente novo entra numa vaga arrumada; o que voce
 // moveu ou redimensionou fica como deixou, inclusive depois de fechar o app.
@@ -1310,6 +1431,31 @@ final class AgentLayout: ObservableObject {
         return d
     }
 
+    // quadro de status do maestro: card proprio, a direita do maestro
+    static let quadroKey = "@quadro"
+
+    var quadroBox: Box {
+        if let b = boxes[Self.quadroKey] { return b }
+        let m = maestroBox
+        return Box(x: m.x + m.w + 48, y: m.y, w: 400, h: m.h)
+    }
+
+    func moveQuadro(by d: CGSize) {
+        var b = quadroBox
+        b.x = max(0, b.x + d.width)
+        b.y = max(0, b.y + d.height)
+        boxes[Self.quadroKey] = b
+        persist()
+    }
+
+    func resizeQuadro(by d: CGSize) {
+        var b = quadroBox
+        b.w = min(Self.maxW, max(300, b.w + d.width))
+        b.h = min(Self.maxH, max(240, b.h + d.height))
+        boxes[Self.quadroKey] = b
+        persist()
+    }
+
     func moveMaestro(by d: CGSize) {
         var b = maestroBox
         b.x = max(0, b.x + d.width)
@@ -1361,8 +1507,9 @@ final class AgentLayout: ObservableObject {
     // area total que o canvas precisa ter para caber tudo que foi arrastado
     func canvasSize(names: [String]) -> CGSize {
         let m = maestroBox
-        var w: CGFloat = max(1140, m.x + m.w + 60)
-        var h: CGFloat = max(560, m.y + m.h + 60)
+        let q = quadroBox
+        var w: CGFloat = max(1140, max(m.x + m.w, q.x + q.w) + 60)
+        var h: CGFloat = max(560, max(m.y + m.h, q.y + q.h) + 60)
         for (i, n) in names.enumerated() {
             let b = box(n, index: i)
             w = max(w, b.x + b.w + 60)
@@ -2884,6 +3031,10 @@ struct ContentView: View {
                         }
                         .allowsHitTesting(false)
                         MaestroNode(orch: orch)
+                        // o quadro aparece quando o maestro escreve nele
+                        if !orch.quadro.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            BoardNode(orch: orch)
+                        }
                         // o cartao de passo ACOMPANHA o maestro: fica ancorado
                         // logo acima dele, onde quer que ele esteja
                         if orch.project == nil {

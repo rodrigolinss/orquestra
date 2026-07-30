@@ -55,31 +55,28 @@ config_get() {
   printf '%s' "${valor:-$padrao}"
 }
 
-# --- Teto pela memoria da maquina -------------------------------------------
-# Cada agente e um Claude Code inteiro: node, servidor de linguagem, cache.
-# Na pratica ~1,5 GB cada quando esta pensando. Passar do que a RAM aguenta
-# nao deixa a equipe "mais lenta": o macOS comeca a matar processos, e ele nao
-# escolhe os menos importantes — leva o servidor tmux junto e a equipe inteira
-# morre no meio do trabalho. Aconteceu tres vezes num dia so.
-ram_gb() {
-  local bytes=""
-  if [ -r /proc/meminfo ]; then
-    bytes="$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)"
-  else
-    bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
-  fi
-  case "$bytes" in ''|*[!0-9]*) echo 8; return ;; esac
-  echo $(( bytes / 1073741824 ))
-}
+# --- Memoria livre de verdade -----------------------------------------------
+# Um agente e um Claude Code: medido nesta maquina, ~130 MB cada, nao os
+# "1,5 GB" que eu tinha chutado. O que aperta a maquina nao e o numero de
+# agentes por si — e quanta memoria sobra no momento, contando tudo que voce
+# ja tem aberto. Entao o nvo nao usa formula: ele olha o que ha de livre agora
+# e recusa criar mais um quando o espaco acabou de verdade.
+MB_POR_AGENTE="${NVO_MB_POR_AGENTE:-250}"   # medido com folga (o maior visto: ~280 MB)
+MB_RESERVA="${NVO_MB_RESERVA:-700}"         # folga que o sistema precisa para nao matar
 
-# 2 GB reservados para o sistema e o app; ~1,5 GB por agente. Numa maquina de
-# 8 GB da 4 — que e o que ela aguenta de verdade, nao o que da vontade.
-teto_por_ram() {
-  local gb n
-  gb="$(ram_gb)"
-  n=$(( (gb - 2) * 2 / 3 ))
-  [ "$n" -ge 1 ] || n=1
-  echo "$n"
+mem_livre_mb() {
+  if [ -r /proc/meminfo ]; then
+    awk '/^MemAvailable:/ {print int($2/1024); exit}' /proc/meminfo
+    return
+  fi
+  # macOS: paginas livres + inativas + especulativas sao reaproveitaveis
+  vm_stat 2>/dev/null | awk '
+    /page size of/ { for (i=1;i<=NF;i++) if ($i+0 > 1000) { ps=$i; break } }
+    /Pages free/         { gsub(/\./,"",$3); f=$3 }
+    /Pages inactive/     { gsub(/\./,"",$3); i=$3 }
+    /Pages speculative/  { gsub(/\./,"",$3); s=$3 }
+    /Pages purgeable/    { gsub(/\./,"",$3); p=$3 }
+    END { if (ps=="") ps=16384; print int((f+i+s+p)*ps/1048576) }'
 }
 
 NVO_MAX_DEPTH="${NVO_MAX_DEPTH:-$(config_get max_depth 2)}"
@@ -418,12 +415,13 @@ cmd_new() {
   [ "$vivos" -lt "$NVO_MAX_AGENTS" ] || die \
     "ja existem $vivos agentes ativos (limite $NVO_MAX_AGENTS). Aprove ou descarte alguem antes de criar outro."
 
-  # Teto fisico, acima do configurado: a RAM da maquina nao e opiniao. Estourar
-  # aqui nao deixa a equipe lenta — faz o sistema matar processos no meio do
-  # trabalho, o servidor tmux inclusive, e a equipe inteira cai de uma vez.
-  local teto_ram; teto_ram="$(teto_por_ram)"
-  [ "$vivos" -lt "$teto_ram" ] || die \
-    "esta maquina tem $(ram_gb) GB de RAM e ja esta com $vivos agentes: mais um comeca a derrubar a equipe. Aprove ou descarte alguem antes (o teto fisico e $teto_ram; para mudar, NVO_MAX_AGENTS nao adianta, so mais memoria)."
+  # Memoria: nao e a contagem de agentes que aperta, e o quanto sobra agora.
+  # Se o sistema fica sem folga ele mata processos no meio do trabalho — e o
+  # servidor tmux vai junto, derrubando a equipe inteira. Entao medimos.
+  local livre; livre="$(mem_livre_mb)"
+  if [ -n "$livre" ] && [ "$livre" -lt "$(( MB_POR_AGENTE + MB_RESERVA ))" ]; then
+    die "so restam ${livre} MB de memoria livre e um agente precisa de ~${MB_POR_AGENTE} MB. Feche algumas abas do navegador ou aprove/descarte um agente — cada agente pesa pouco, o aperto vem do total aberto na maquina."
+  fi
 
   local wt base branch note meta
   wt="$(wt_path "$name")"

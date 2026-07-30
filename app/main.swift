@@ -277,7 +277,69 @@ struct AgentInfo: Identifiable, Equatable {
     var progress: String = ""    // ultima linha util das notas: o que ele esta fazendo agora
     var parent: String = ""      // vazio = filho direto do maestro
     var depth: Int = 1           // maestro e 0; agentes dele, 1; subagentes, 2
+    var verificacao: Verificacao? = nil   // selo de confiança; nil = 'nvo status' indisponível
     var id: String { name }
+}
+
+// Selo de confiança do card: dados de 'nvo status <nome>', linhas chave=valor,
+// vindas de um comando que outro agente desta rodada (nvo-provas) está
+// construindo. Aceitamos alguns nomes de chave alternativos porque o formato
+// exato não foi visto ainda — se a versão instalada não tiver o comando (ou a
+// saída não bater com nada conhecido), o resultado é nil e o card não mostra
+// selo nenhum, sem erro na tela.
+struct Verificacao: Equatable {
+    let resultado: String       // "ok", "falhou", "sem_teste", "timeout" ou "" (nunca verificado)
+    let quando: String
+    let colideCom: [String]
+    let saida: String           // texto bruto de 'nvo status', mostrado ao clicar no selo
+
+    var passou: Bool { resultado == "ok" }
+    var falhou: Bool { resultado == "falhou" || resultado == "timeout" }
+    var semTeste: Bool { resultado == "sem_teste" }
+
+    var label: String {
+        if passou { return "verificação ok" }
+        if resultado == "falhou" { return "verificação falhou" }
+        if resultado == "timeout" { return "verificação expirou" }
+        if semTeste { return "sem teste" }
+        return "não verificado"
+    }
+    var cor: Color {
+        if passou { return AgentStatus.concluido.color }
+        if falhou { return AgentStatus.bloqueado.color }
+        return Theme.dim
+    }
+    var icone: String {
+        if passou { return "checkmark.seal.fill" }
+        if falhou { return "xmark.seal.fill" }
+        if semTeste { return "seal" }
+        return "questionmark.diamond"
+    }
+
+    static func parse(_ out: String) -> Verificacao? {
+        var campos: [String: String] = [:]
+        for linha in out.split(separator: "\n") {
+            guard let eq = linha.firstIndex(of: "=") else { continue }
+            let chave = String(linha[linha.startIndex..<eq]).trimmingCharacters(in: .whitespaces).lowercased()
+            let valor = String(linha[linha.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            campos[chave] = valor
+        }
+        guard !campos.isEmpty else { return nil }
+        let resultado = (campos["verificacao"] ?? campos["resultado"] ?? campos["status"]
+                          ?? campos["check"] ?? "").lowercased()
+        let quando = campos["quando"] ?? campos["hora"] ?? campos["horario"] ?? campos["data"] ?? ""
+        let colisaoRaw = campos["colide_com"] ?? campos["colisao"] ?? campos["colisoes"]
+                          ?? campos["conflita_com"] ?? campos["colide"] ?? ""
+        let colide = colisaoRaw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return Verificacao(resultado: resultado, quando: quando, colideCom: colide, saida: out)
+    }
+}
+
+// "mexe nos mesmos arquivos que fulano" — linguagem humana para a colisão
+func colisaoTexto(_ nomes: [String]) -> String {
+    "mexe nos mesmos arquivos que \(nomes.joined(separator: ", "))"
 }
 
 // A tarefa fica na 1a linha do .prompt ("Tarefa: ..."). Encurtamos na primeira
@@ -398,6 +460,9 @@ final class Orchestra: ObservableObject {
     @Published var usage: UsageInfo?
     @Published var harnesses: [Harness] = []
     @Published var limites: [Limite] = []
+    // nomes com 'nvo check' rodando agora — o botão de verificar entra em
+    // "verificando…" sem travar o resto da tela
+    @Published var verificando: Set<String> = []
 
     fileprivate var lastStatus: [String: AgentStatus] = [:]
     // avisos visuais na tela; o notifyMac do macOS continua, mas nao adianta
@@ -761,13 +826,23 @@ final class Orchestra: ObservableObject {
                     }
                     let prompt = (try? String(contentsOfFile: "\(ORQ)/agents/\(proj)/\(name).prompt",
                                               encoding: .utf8)) ?? ""
+                    // selo de confiança: só para quem já terminou, e pendurado
+                    // neste mesmo ciclo de 2s — nenhum polling novo. Se 'nvo
+                    // status' ainda não existir na versão instalada, r.code
+                    // vem != 0 e o card simplesmente não mostra selo.
+                    var verificacao: Verificacao? = nil
+                    if status == .concluido {
+                        let r = self.nvo(["status", name])
+                        if r.code == 0 { verificacao = Verificacao.parse(r.out) }
+                    }
                     list.append(AgentInfo(name: name, branch: branch, changes: changes,
                                           status: status, pane: self.pane(name, lines: 12) ?? "(sem janela tmux)",
                                           note: String(note.suffix(8000)),
                                           cli: cli, model: model,
                                           task: resumoTarefa(prompt),
                                           progress: ultimoProgresso(note),
-                                          parent: parent, depth: depth))
+                                          parent: parent, depth: depth,
+                                          verificacao: verificacao))
                 }
             }
             // conversa do maestro precisa de fôlego para rolar pra trás: mais
@@ -1010,6 +1085,22 @@ final class Orchestra: ObservableObject {
         DispatchQueue.global().async {
             let r = self.nvo(["diff", name])
             DispatchQueue.main.async { done(r.code == 0 ? (r.out.isEmpty ? "(sem mudanças)" : r.out) : r.err) }
+        }
+    }
+
+    // Botão discreto do selo: roda os testes do agente dentro da cópia dele.
+    // Não bloqueia a tela — o card mostra "verificando…" e o resultado chega
+    // no próximo refresh, via 'nvo status'. Se 'nvo check' ainda não existir
+    // na versão instalada, o comando falha calado: sem erro na tela.
+    func checkAgent(_ name: String) {
+        guard !verificando.contains(name) else { return }
+        verificando.insert(name)
+        DispatchQueue.global().async {
+            _ = self.nvo(["check", name])
+            DispatchQueue.main.async {
+                self.verificando.remove(name)
+                self.refresh()
+            }
         }
     }
 
@@ -2327,6 +2418,7 @@ struct AgentNode: View {
     let onDiff: () -> Void
     let onKill: () -> Void
     let onDone: () -> Void
+    let onVerificacao: () -> Void
     @State private var draft = ""
     // O terminal deixou de ser o padrao. O card mostra o que o agente
     // escreveu em portugues; a tela crua fica a um clique, para quando voce
@@ -2393,6 +2485,38 @@ struct AgentNode: View {
                           : agent.status == .bloqueado
                           ? "o agente relatou um bloqueio — leia as notas e destrave ele"
                           : "o agente está trabalhando — acompanhe pela tela ou pelas notas")
+                // selo de confiança: só existe depois de concluído, e só
+                // aparece de verdade quando 'nvo status' respondeu algo
+                if agent.status == .concluido, let v = agent.verificacao {
+                    Button(action: onVerificacao) {
+                        HStack(spacing: 3) {
+                            Image(systemName: v.icone).font(.system(size: Theme.uiSize(8)))
+                            Text(v.label).font(.system(size: Theme.uiSize(9)))
+                        }
+                        .foregroundColor(v.cor)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(v.cor.opacity(0.12)).cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("verificação\(v.quando.isEmpty ? "" : " de \(v.quando)") — clique para ver a saída guardada")
+                }
+                if agent.status == .concluido {
+                    let verificando = orch.verificando.contains(agent.name)
+                    Button {
+                        orch.checkAgent(agent.name)
+                    } label: {
+                        if verificando {
+                            ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                        } else {
+                            Image(systemName: "checkmark.shield")
+                                .font(.system(size: Theme.uiSize(10)))
+                                .foregroundColor(Theme.dim)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(verificando)
+                    .help(verificando ? "verificando…" : "rodar os testes do projeto dentro da cópia deste agente")
+                }
                 Spacer()
                 Text("\(agent.changes) arq. alterados")
                     .font(.system(size: Theme.uiSize(9), design: .monospaced))
@@ -2461,6 +2585,25 @@ struct AgentNode: View {
                 .background(Color.white.opacity(0.04))
                 .cornerRadius(5)
                 .help("o alvo é a tarefa que você pediu; a seta é a última anotação de progresso do agente")
+            }
+
+            // aviso, não impedimento: dois agentes mexendo nos mesmos arquivos
+            // vão brigar no merge — a pessoa decide o que fazer com isso
+            if let v = agent.verificacao, !v.colideCom.isEmpty {
+                HStack(alignment: .top, spacing: 5) {
+                    Image(systemName: "bolt.trianglebadge.exclamationmark")
+                        .font(.system(size: Theme.uiSize(9)))
+                        .foregroundColor(AgentStatus.bloqueado.color)
+                    Text(colisaoTexto(v.colideCom))
+                        .font(.system(size: Theme.uiSize(10)))
+                        .foregroundColor(Theme.text.opacity(0.85))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                .padding(.horizontal, 7).padding(.vertical, 5)
+                .background(AgentStatus.bloqueado.color.opacity(0.08))
+                .cornerRadius(5)
+                .help("outro agente vivo alterou os mesmos arquivos — os dois merges vão conflitar")
             }
 
             // nos agentes o aviso so aparece quando a sessao REALMENTE esgota:
@@ -3103,7 +3246,7 @@ struct TransparencyChecker: View {
 // MARK: - Sheets
 
 struct SheetTarget: Identifiable {
-    enum Kind { case notes, diff, kill, done, stop, limpar }
+    enum Kind { case notes, diff, kill, done, stop, limpar, verificacao }
     let id = UUID()
     let name: String
     let kind: Kind
@@ -3215,6 +3358,10 @@ struct DoneSheet: View {
     @State private var error: String?
     @State private var merging = false
 
+    private var verificacao: Verificacao? {
+        orch.agents.first(where: { $0.name == name })?.verificacao
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -3228,6 +3375,25 @@ struct DoneSheet: View {
             Text("Revise as mudanças abaixo. Aplicar faz merge --no-ff de agent/\(name) e remove o worktree; as notas ficam guardadas.")
                 .font(.system(size: Theme.uiSize(10))).foregroundColor(Theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // a informação mais importante do momento: dá pra confiar? vem
+            // ANTES do diff, não escondida embaixo dele
+            if let v = verificacao {
+                HStack(spacing: 8) {
+                    Image(systemName: v.icone).foregroundColor(v.cor)
+                    Text(v.label + (v.quando.isEmpty ? "" : " · \(v.quando)"))
+                        .foregroundColor(v.cor)
+                    if !v.colideCom.isEmpty {
+                        Text("·  " + colisaoTexto(v.colideCom))
+                            .foregroundColor(AgentStatus.bloqueado.color)
+                    }
+                    Spacer()
+                }
+                .font(.system(size: Theme.uiSize(11), weight: .semibold, design: .monospaced))
+                .padding(.horizontal, 8).padding(.vertical, 6)
+                .background(v.cor.opacity(0.08)).cornerRadius(6)
+                .fixedSize(horizontal: false, vertical: true)
+            }
 
             TerminalText(content: diff, size: 10.5, colorDiff: true)
 
@@ -4130,7 +4296,8 @@ struct ContentView: View {
                                     orch.diff(a.name) { diffText = $0 }
                                 },
                                 onKill: { sheet = SheetTarget(name: a.name, kind: .kill) },
-                                onDone: { sheet = SheetTarget(name: a.name, kind: .done) })
+                                onDone: { sheet = SheetTarget(name: a.name, kind: .done) },
+                                onVerificacao: { sheet = SheetTarget(name: a.name, kind: .verificacao) })
                         }
                         if orch.agents.isEmpty {
                             Text(orch.maestroRunning
@@ -4253,6 +4420,10 @@ struct ContentView: View {
             case .notes:
                 TextSheet(title: "notas — \(s.name)",
                           content: orch.agents.first(where: { $0.name == s.name })?.note ?? "(sem notas)")
+            case .verificacao:
+                TextSheet(title: "verificação — \(s.name)",
+                          content: orch.agents.first(where: { $0.name == s.name })?.verificacao?.saida
+                                    ?? "(sem saída guardada)")
             case .diff:
                 TextSheet(title: "diff — \(s.name)", content: diffText)
             case .kill:

@@ -314,14 +314,20 @@ final class Orchestra: ObservableObject {
     @Published var autoYes: Bool = UserDefaults.standard.bool(forKey: "modo.liberdade") {
         didSet { UserDefaults.standard.set(autoYes, forKey: "modo.liberdade") }
     }
+    @Published var somVolume: Double = {
+        let v = UserDefaults.standard.double(forKey: "aviso.volume")
+        return v > 0 ? v : 0.35
+    }() {
+        didSet { UserDefaults.standard.set(somVolume, forKey: "aviso.volume") }
+    }
     private var lastPromptSig: [String: String] = [:]   // por janela: prompt ja avisado
     private var lastAutoAnswer: [String: Date] = [:]    // por assinatura: quando respondemos
 
-    // "Purr" e o som mais discreto do sistema; volume baixo de proposito.
+    // "Purr" e o som mais discreto do sistema; o volume e da pessoa.
     // Instancia nova a cada toque: play() num som ainda tocando nao toca.
-    static func somSuave() {
+    static func somSuave(volume: Double = 0.35) {
         guard let s = NSSound(named: "Purr") else { return }
-        s.volume = 0.35
+        s.volume = Float(min(1.0, max(0.05, volume)))
         s.play()
     }
 
@@ -345,7 +351,7 @@ final class Orchestra: ObservableObject {
             lastAutoAnswer[sig] = agora
             sendLiteral(janela, "1")
         } else if novo, soundOn {
-            Orchestra.somSuave()
+            Orchestra.somSuave(volume: somVolume)
         }
     }
 
@@ -739,6 +745,45 @@ final class Orchestra: ObservableObject {
 }
 
 // MARK: - Cabos (anchor preferences)
+
+// Pan do canvas estilo Figma: clicar no VAZIO e arrastar move a visao.
+// Fica atras dos cards no ZStack, entao so recebe o clique onde nao ha card.
+// Move o NSScrollView diretamente em coordenadas de tela — independe do zoom.
+struct PanArea: NSViewRepresentable {
+    final class PanView: NSView {
+        private var last: NSPoint?
+
+        override func mouseDown(with event: NSEvent) {
+            last = event.locationInWindow
+            NSCursor.closedHand.push()
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let scroll = enclosingScrollView, let l = last else { return }
+            let p = event.locationInWindow
+            let clip = scroll.contentView
+            var o = clip.bounds.origin
+            o.x -= (p.x - l.x)
+            o.y += clip.isFlipped ? (p.y - l.y) : -(p.y - l.y)
+            o = clip.constrainBoundsRect(NSRect(origin: o, size: clip.bounds.size)).origin
+            clip.setBoundsOrigin(o)
+            scroll.reflectScrolledClipView(clip)
+            last = p
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            last = nil
+            NSCursor.pop()
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .openHand)
+        }
+    }
+
+    func makeNSView(context: Context) -> PanView { PanView() }
+    func updateNSView(_ nsView: PanView, context: Context) {}
+}
 
 struct NodeAnchors: PreferenceKey {
     static var defaultValue: [String: Anchor<CGPoint>] = [:]
@@ -1842,21 +1887,43 @@ struct AjustesView: View {
                 secao("Avisos e autonomia",
                       "Como o orquestra chama a sua atenção — e o quanto ele decide sozinho.") {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack(alignment: .top, spacing: 8) {
-                            Toggle(isOn: Binding(get: { orch.soundOn }, set: { orch.soundOn = $0 })) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("aviso sonoro").font(.system(size: Theme.uiSize(11), weight: .semibold))
-                                        .foregroundColor(Theme.text)
-                                    Text("um toque bem suave quando o maestro ou um agente fica esperando a sua resposta — só na hora em que a pergunta aparece, nunca repetido")
-                                        .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
-                                        .fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack(alignment: .top, spacing: 8) {
+                                Toggle(isOn: Binding(get: { orch.soundOn }, set: { orch.soundOn = $0 })) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("aviso sonoro").font(.system(size: Theme.uiSize(11), weight: .semibold))
+                                            .foregroundColor(Theme.text)
+                                        Text("um toque bem suave quando o maestro ou um agente fica esperando a sua resposta — só na hora em que a pergunta aparece, nunca repetido")
+                                            .font(.system(size: Theme.uiSize(9))).foregroundColor(Theme.dim)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .toggleStyle(.checkbox)
+                                Spacer()
+                                SmallButton(label: "ouvir", icon: "speaker.wave.1",
+                                            help: "toca o aviso uma vez, no volume escolhido") {
+                                    Orchestra.somSuave(volume: orch.somVolume)
                                 }
                             }
-                            .toggleStyle(.checkbox)
-                            Spacer()
-                            SmallButton(label: "ouvir", icon: "speaker.wave.1",
-                                        help: "toca o aviso uma vez, para você calibrar") {
-                                Orchestra.somSuave()
+                            if orch.soundOn {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "speaker.fill")
+                                        .font(.system(size: Theme.uiSize(8))).foregroundColor(Theme.dim)
+                                    // soltou o dedo, ouve na hora como ficou
+                                    Slider(value: Binding(get: { orch.somVolume },
+                                                          set: { orch.somVolume = $0 }),
+                                           in: 0.1...1.0) { arrastando in
+                                        if !arrastando { Orchestra.somSuave(volume: orch.somVolume) }
+                                    }
+                                    .frame(maxWidth: 220)
+                                    Image(systemName: "speaker.wave.3.fill")
+                                        .font(.system(size: Theme.uiSize(8))).foregroundColor(Theme.dim)
+                                    Text("\(Int((orch.somVolume * 100).rounded()))%")
+                                        .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                                        .foregroundColor(Theme.dim)
+                                        .frame(minWidth: Theme.uiSize(30), alignment: .trailing)
+                                    Spacer()
+                                }
                             }
                         }
                         .padding(.horizontal, 12).padding(.vertical, 10)
@@ -2790,6 +2857,10 @@ struct ContentView: View {
                     // os outros. Maestro e agentes vivem no mesmo plano.
                     let canvas = layout.canvasSize(names: orch.agents.map { $0.name })
                     ZStack(alignment: .topLeading) {
+                        // fundo clicavel: arrastar o vazio move a visao (pan)
+                        PanArea()
+                            .frame(width: canvas.width, height: canvas.height)
+                            .help("arraste o fundo para mover a visão do canvas")
                         MaestroNode(orch: orch)
                         // o cartao de passo ACOMPANHA o maestro: fica ancorado
                         // logo acima dele, onde quer que ele esteja

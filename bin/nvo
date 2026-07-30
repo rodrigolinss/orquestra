@@ -26,6 +26,13 @@ PROJECTS="$ORQ/projects.conf"
 SESSION_BASE="orquestra"
 SESSION="$SESSION_BASE"
 
+# Servidor tmux PRIVADO, num socket so nosso. O tmux padrao e compartilhado
+# com tudo que voce (ou um agente testando algo) roda na maquina, e um
+# "tmux kill-server" perdido la derruba a equipe inteira no meio do trabalho —
+# aconteceu. Com socket proprio, nada de fora alcanca as janelas dos agentes.
+TMUX_SOCKET="${NVO_TMUX_SOCKET:-orquestra}"
+tmux() { command tmux -L "$TMUX_SOCKET" "$@"; }
+
 # O nvo pode ser chamado pelo app (launchd), que herda um PATH minimo sem
 # homebrew e sem ~/.local/bin. Como o tmux congela o PATH de quando o servidor
 # subiu, um agente lancado nesse estado nao acha o "claude" e falha calado.
@@ -178,6 +185,8 @@ nvo — orquestrador local de agentes Claude Code
   nvo kill <nome>              encerra janela e remove worktree SEM merge
   nvo attach                   entra na sessao tmux deste projeto
   nvo projects                 lista os projetos ja usados e agentes vivos
+  nvo religar [<nome>|--todos] recria a janela de quem perdeu o terminal e
+                               manda o agente continuar de onde parou
   nvo stop [--forget-project]  encerra a sessao (maestro e agentes) preservando
                                worktrees, branches, notas e o projeto ativo
   nvo limpar [--descartar-agentes]
@@ -575,6 +584,72 @@ cmd_limpar() {
   tmux kill-window -t "$SESSION:maestro" 2>/dev/null || true
   rm -f "$META_ROOT/$PROJ.maestro.txt"
   echo "painel limpo. Inicie o maestro novo pelo app, ou: nvo maestro"
+}
+
+# Traz de volta um agente cujo terminal morreu (servidor reiniciado, maquina
+# desligada, janela fechada) sem perder o que ele ja fez. O worktree, a branch
+# e as notas continuam no disco: o que falta e uma janela e um harness rodando
+# nela. Para o claude usamos --continue, que retoma a conversa daquele
+# diretorio; nos outros, relemos o briefing original.
+cmd_religar() {
+  local todos=0 nomes=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --todos) todos=1; shift ;;
+      -*) die "uso: nvo religar [<nome>...|--todos]" ;;
+      *) nomes+=("$1"); shift ;;
+    esac
+  done
+  load_project
+  ensure_session
+
+  if [ "$todos" -eq 1 ]; then
+    nomes=()
+    local d
+    for d in "$WT_ROOT/$PROJ"/*/; do
+      [ -d "$d" ] || continue
+      nomes+=("$(basename "$d")")
+    done
+  fi
+  [ ${#nomes[@]} -gt 0 ] || die "uso: nvo religar [<nome>...|--todos]"
+
+  local name wt meta cli model launch reaceso=0 ja=0
+  for name in "${nomes[@]}"; do
+    check_name "$name"
+    agent_exists "$name" || { echo "pulado: '$name' nao tem copia de trabalho"; continue; }
+    # janela viva nao se mexe: religar nao pode interromper quem esta pensando
+    if tmux list-windows -t "$SESSION" -F '#W' 2>/dev/null | grep -qxF "$name"; then
+      ja=$((ja+1))
+      continue
+    fi
+    wt="$(wt_path "$name")"
+    assert_wt_inside "$wt"
+    meta="$(meta_path "$name")"
+    cli="claude"; model=""
+    if [ -f "$meta.meta" ]; then
+      cli="$(sed -n 's/^cli=//p' "$meta.meta" | tail -1)"
+      model="$(sed -n 's/^model=//p' "$meta.meta" | tail -1)"
+      [ -n "$cli" ] || cli="claude"
+    fi
+    launch="$(harness_launch "$cli" "$model")"
+    [ -n "$launch" ] || launch="$cli"
+
+    tmux new-window -t "$SESSION" -n "$name" -c "$wt"
+    if [ "$cli" = "claude" ]; then
+      # --continue retoma a ultima conversa daquele diretorio: o agente volta
+      # sabendo o que ja tinha feito, em vez de recomecar do zero
+      tmux send-keys -t "$SESSION:$name" \
+        "$launch --continue \"O terminal caiu e voltou. Releia suas notas em $(note_path "$name") e continue de onde parou. Se ja tinha terminado, so confirme o STATUS.\"" Enter
+    elif [ -f "$meta.prompt" ]; then
+      tmux send-keys -t "$SESSION:$name" "$launch \"\$(cat '$meta.prompt')\"" Enter
+    else
+      tmux send-keys -t "$SESSION:$name" "$launch" Enter
+    fi
+    echo "religado: $name ($cli${model:+ · $model})"
+    reaceso=$((reaceso+1))
+  done
+  [ "$ja" -eq 0 ] || echo "$ja ja estava(m) com janela viva, nao toquei"
+  echo "$reaceso agente(s) religado(s)"
 }
 
 cmd_maestro() {
@@ -1196,7 +1271,7 @@ cmd_status() {
 cmd_attach() {
   load_project
   ensure_session
-  exec tmux attach -t "$SESSION"
+  exec command tmux -L "$TMUX_SOCKET" attach -t "$SESSION"
 }
 
 cmd_doctor() {
@@ -1319,6 +1394,7 @@ case "${1:-}" in
   maestro) shift; cmd_maestro "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
   limpar)  shift; cmd_limpar "$@" ;;
+  religar) shift; cmd_religar "$@" ;;
   harnesses) shift; cmd_harnesses "$@" ;;
   config)  shift; cmd_config "$@" ;;
   approve) shift; cmd_approve "$@" ;;

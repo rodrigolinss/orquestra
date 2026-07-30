@@ -40,6 +40,11 @@ func toolPath(_ name: String) -> String {
     return name
 }
 let TMUX = toolPath("tmux")
+// Servidor tmux privado — mesmo socket que o nvo usa. O tmux padrao e
+// compartilhado com a maquina inteira, e um kill-server perdido la ja
+// derrubou a equipe uma vez. Aqui ninguem de fora alcanca.
+let TMUX_SOCKET = "orquestra"
+func tmuxArgs(_ a: [String]) -> [String] { ["-L", TMUX_SOCKET] + a }
 let GIT = "/usr/bin/git"
 
 @discardableResult
@@ -717,8 +722,8 @@ final class Orchestra: ObservableObject {
 
     func ensureSession() {
         guard let repo = pinned else { return }   // sem projeto nao ha sessao
-        if sh(TMUX, ["has-session", "-t", session]).code != 0 {
-            sh(TMUX, ["new-session", "-d", "-s", session, "-n", "maestro", "-c", repo])
+        if sh(TMUX, tmuxArgs(["has-session", "-t", session])).code != 0 {
+            sh(TMUX, tmuxArgs(["new-session", "-d", "-s", session, "-n", "maestro", "-c", repo]))
         }
     }
 
@@ -746,7 +751,7 @@ final class Orchestra: ObservableObject {
     static let shellCommands: Set<String> = ["zsh", "bash", "sh", "fish", "login", "tmux", "dash", "ksh"]
 
     func windowBusy(_ window: String) -> Bool {
-        let r = sh(TMUX, ["list-panes", "-t", "\(session):\(window)", "-F", "#{pane_current_command}"])
+        let r = sh(TMUX, tmuxArgs(["list-panes", "-t", "\(session):\(window)", "-F", "#{pane_current_command}"]))
         guard r.code == 0 else { return false }
         return r.out.split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -773,7 +778,7 @@ final class Orchestra: ObservableObject {
     }
 
     func pane(_ window: String, lines: Int = 40, historico: Int = 200) -> String? {
-        let r = sh(TMUX, ["capture-pane", "-pt", "\(session):\(window)", "-S", "-\(historico)"])
+        let r = sh(TMUX, tmuxArgs(["capture-pane", "-pt", "\(session):\(window)", "-S", "-\(historico)"]))
         guard r.code == 0 else { return nil }
         let all = r.out.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
@@ -1003,12 +1008,12 @@ final class Orchestra: ObservableObject {
 
     func sendKey(_ window: String, _ key: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(session):\(window)", key])
+        sh(TMUX, tmuxArgs(["send-keys", "-t", "\(session):\(window)", key]))
     }
 
     func sendLiteral(_ window: String, _ text: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(session):\(window)", "-l", text])
+        sh(TMUX, tmuxArgs(["send-keys", "-t", "\(session):\(window)", "-l", text]))
     }
 
     func approvePlan(_ name: String) {
@@ -1020,9 +1025,9 @@ final class Orchestra: ObservableObject {
 
     func sendMaestro(_ text: String) {
         ensureSession()
-        sh(TMUX, ["send-keys", "-t", "\(session):maestro", "-l", text])
+        sh(TMUX, tmuxArgs(["send-keys", "-t", "\(session):maestro", "-l", text]))
         usleep(300_000)
-        sh(TMUX, ["send-keys", "-t", "\(session):maestro", "Enter"])
+        sh(TMUX, tmuxArgs(["send-keys", "-t", "\(session):maestro", "Enter"]))
     }
 
     func sendAgent(_ name: String, _ text: String) {
@@ -1146,6 +1151,28 @@ final class Orchestra: ObservableObject {
         p.arguments = ["-c", "sleep 1; open '\(caminho)'"]
         try? p.run()
         NSApp.terminate(nil)
+    }
+
+    // Quantos agentes existem no disco mas perderam a janela do terminal.
+    // Acontece quando a maquina dorme, o tmux cai ou voce fecha a janela: o
+    // trabalho continua salvo, mas ninguem esta pensando nele.
+    var apagados: [String] {
+        agents.filter { $0.pane.contains("(sem janela tmux)") }.map { $0.name }
+    }
+
+    func religar(done: @escaping (String?) -> Void) {
+        DispatchQueue.global().async {
+            let r = self.nvo(["religar", "--todos"])
+            DispatchQueue.main.async {
+                if r.code == 0 {
+                    self.avisar("equipe religada",
+                                "os agentes voltaram para onde pararam — nada foi recomeçado do zero",
+                                icone: "bolt.heart.fill", cor: AgentStatus.concluido.color)
+                }
+                done(r.code == 0 ? nil : self.erroDe(r, "religar --todos"))
+                self.refresh()
+            }
+        }
     }
 
     func isGitRepo(_ path: String) -> Bool {
@@ -1673,7 +1700,7 @@ struct MaestroNode: View {
                 }
                 SmallButton(label: "ver ao vivo", icon: "terminal",
                             help: "abre o Terminal com todas as janelas (tmux). Sair: Ctrl-b depois d") {
-                    if let erro = openTerminal("tmux attach -t \(orch.session)") { orch.lastError = erro }
+                    if let erro = openTerminal("tmux -L \(TMUX_SOCKET) attach -t \(orch.session)") { orch.lastError = erro }
                 }
             }
             // estado inequivoco: nada de adivinhar se o maestro esta esperando
@@ -4006,6 +4033,21 @@ struct ContentView: View {
                 // Fica ate voce reabrir. O aviso flutuante some sozinho, e este
                 // e o caso em que sumir e o pior comportamento possivel: voce
                 // segue depurando uma tela que ja esta consertada no disco.
+                if !orch.apagados.isEmpty {
+                    Button { orch.religar { _ in } } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "bolt.heart.fill")
+                                .font(.system(size: Theme.uiSize(9)))
+                            Text("\(orch.apagados.count) sem terminal — religar")
+                                .font(.system(size: Theme.uiSize(9), weight: .semibold))
+                        }
+                        .foregroundColor(Theme.bg)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(AgentStatus.bloqueado.color).cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("estes agentes perderam a janela do terminal (máquina dormiu, tmux caiu). O trabalho está salvo — religar traz cada um de volta para onde parou: \(orch.apagados.joined(separator: ", "))")
+                }
                 if orch.versaoNovaNoDisco {
                     Button { orch.reabrirApp() } label: {
                         HStack(spacing: 5) {

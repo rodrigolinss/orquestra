@@ -144,7 +144,9 @@ usage() {
 nvo — orquestrador local de agentes Claude Code
 
   nvo init <caminho-do-repo>   registra o projeto ativo
-  nvo maestro                  inicia o maestro no projeto, com briefing
+  nvo maestro [harness] [modelo]
+                               inicia o maestro no projeto, com briefing
+                               (ex.: nvo maestro claude opus)
   nvo new [--plan] <nome> "<tarefa>" [claude|codex] [modelo]
                                cria branch+worktree e inicia o agente no tmux
                                --plan: agente planeja e espera aprovacao
@@ -498,8 +500,8 @@ O QUE VOCE NAO FAZ:
 Agora responda apenas "pronto" e aguarde as instrucoes do humano.
 EOF
   tmux send-keys -t "$SESSION:maestro" \
-    "cd '$REPO' && claude \"\$(cat '$brief')\"" Enter
-  echo "maestro iniciado em $REPO"
+    "cd '$REPO' && $mlaunch \"\$(cat '$brief')\"" Enter
+  echo "maestro iniciado em $REPO ($mcli${mmodel:+ · $mmodel})"
   echo "  acompanhe no app, ou entre com: nvo attach"
 }
 

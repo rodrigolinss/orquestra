@@ -522,10 +522,22 @@ final class Orchestra: ObservableObject {
 
     // MARK: acoes (todas via nvo — o app nao inventa caminho proprio)
 
+    // Modelo do maestro: escolha da pessoa, guardada entre sessoes. Os workers
+    // o maestro dosa sozinho pela complexidade; o cerebro do chefe e quem paga
+    // a conta que decide.
+    static let maestroModelKey = "maestro.model"
+    var maestroModel: String {
+        get { UserDefaults.standard.string(forKey: Self.maestroModelKey) ?? "" }
+        set { UserDefaults.standard.set(newValue, forKey: Self.maestroModelKey); objectWillChange.send() }
+    }
+
     // nvo maestro abre o claude DENTRO do projeto, com o briefing de orquestrador
     func startMaestro() {
+        let model = maestroModel
         DispatchQueue.global().async {
-            let r = sh(NVO, ["maestro"])
+            var args = ["maestro", "claude"]
+            if !model.isEmpty { args.append(model) }
+            let r = sh(NVO, args)
             if r.code != 0 {
                 DispatchQueue.main.async { self.lastError = (r.err + r.out).trimmingCharacters(in: .whitespacesAndNewlines) }
             }
@@ -978,6 +990,30 @@ struct MaestroNode: View {
                     .font(.system(size: Theme.uiSize(11), design: .monospaced)).foregroundColor(Theme.dim)
                 Spacer()
                 if !orch.maestroRunning {
+                    // o cerebro do maestro e escolha da pessoa; workers ele dosa sozinho
+                    Menu {
+                        Picker("modelo do maestro", selection: Binding(
+                            get: { orch.maestroModel },
+                            set: { orch.maestroModel = $0 })) {
+                            Text("modelo padrão").tag("")
+                            Text("Opus — melhor pra coordenar").tag("opus")
+                            Text("Sonnet — mais barato").tag("sonnet")
+                            Text("Haiku — mínimo").tag("haiku")
+                        }
+                        .pickerStyle(.inline)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "brain").font(.system(size: Theme.uiSize(8)))
+                            Text(orch.maestroModel.isEmpty ? "modelo" : orch.maestroModel)
+                                .font(.system(size: Theme.uiSize(9), design: .monospaced))
+                        }
+                        .foregroundColor(Theme.dim)
+                        .padding(.horizontal, 6).padding(.vertical, 3)
+                        .background(Color.white.opacity(0.05)).cornerRadius(4)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("qual modelo o maestro usa — os agentes dele você controla no “novo agente”, ou ele escolhe pela complexidade")
                     SmallButton(label: "iniciar maestro", icon: "play.fill", tint: Theme.accent,
                                 help: "abre o Claude Code na janela do maestro — é ele quem orquestra",
                                 prominent: true) {
@@ -1405,24 +1441,29 @@ struct FileEntry: Identifiable {
     var id: String { path }
 }
 
+// Arvore de arquivos estilo IDE: pasta expande PARA BAIXO, no lugar, com
+// recuo por nivel — nada de navegar para dentro e perder a visao do resto.
 struct FileBrowser: View {
     let orch: Orchestra
     let onOpen: (String) -> Void
-    @State private var source = ""   // "" = projeto base; senao nome do agente
-    @State private var rel = ""      // subpasta atual
+    @State private var source = ""            // "" = projeto base; senao nome do agente
+    @State private var expanded: Set<String> = []  // caminhos de pastas abertas
+    @State private var selected: String?
+
+    private struct Row: Identifiable {
+        let entry: FileEntry
+        let depth: Int
+        var id: String { entry.path }
+    }
 
     var root: String? {
         guard let repo = orch.repo, let proj = orch.project else { return nil }
         return source.isEmpty ? repo : "\(ORQ)/worktrees/\(proj)/\(source)"
     }
-    var current: String? {
-        guard let r = root else { return nil }
-        return rel.isEmpty ? r : "\(r)/\(rel)"
-    }
 
-    func entries() -> [FileEntry] {
-        guard let dir = current else { return [] }
-        let skip: Set<String> = ["node_modules", ".git", ".claude", "__pycache__", ".venv", "dist", "build"]
+    private func entries(of dir: String) -> [FileEntry] {
+        let skip: Set<String> = ["node_modules", ".git", ".claude", "__pycache__",
+                                 ".venv", "dist", "build", ".next", "target"]
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         var out: [FileEntry] = []
         for n in names.sorted() {
@@ -1437,6 +1478,24 @@ struct FileBrowser: View {
         return out.sorted { ($0.isDir ? 0 : 1, $0.name) < ($1.isDir ? 0 : 1, $1.name) }
     }
 
+    // achata a arvore: pastas expandidas contribuem seus filhos logo abaixo,
+    // com profundidade +1 (limite de 12 niveis contra ciclos de symlink)
+    private func rows() -> [Row] {
+        guard let r = root else { return [] }
+        var out: [Row] = []
+        func walk(_ dir: String, depth: Int) {
+            guard depth < 12 else { return }
+            for e in entries(of: dir) {
+                out.append(Row(entry: e, depth: depth))
+                if e.isDir && expanded.contains(e.path) {
+                    walk(e.path, depth: depth + 1)
+                }
+            }
+        }
+        walk(r, depth: 0)
+        return out
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("", selection: $source) {
@@ -1445,44 +1504,66 @@ struct FileBrowser: View {
             }
             .pickerStyle(.menu)
             .font(.system(size: Theme.uiSize(10)))
-            .onChange(of: source) { _ in rel = "" }
-
-            if !rel.isEmpty {
-                Button {
-                    rel = rel.split(separator: "/").dropLast().joined(separator: "/")
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "chevron.left").font(.system(size: Theme.uiSize(8)))
-                        Text(rel).font(.system(size: Theme.uiSize(9), design: .monospaced)).lineLimit(1)
-                    }
-                    .foregroundColor(Theme.dim)
-                }
-                .buttonStyle(.plain)
-            }
+            .onChange(of: source) { _ in expanded = []; selected = nil }
+            .help("de quem são os arquivos: o projeto original ou a cópia de trabalho de um agente")
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 1) {
-                    ForEach(entries()) { e in
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(rows()) { row in
+                        let e = row.entry
                         Button {
-                            if e.isDir { rel = rel.isEmpty ? e.name : "\(rel)/\(e.name)" }
-                            else { onOpen(e.path) }
+                            if e.isDir {
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    if expanded.contains(e.path) {
+                                        // fecha a pasta e tudo que esta dentro dela
+                                        expanded = expanded.filter { !$0.hasPrefix(e.path) }
+                                    } else {
+                                        expanded.insert(e.path)
+                                    }
+                                }
+                            } else {
+                                selected = e.path
+                                onOpen(e.path)
+                            }
                         } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: e.isDir ? "folder.fill" : "doc.text")
-                                    .font(.system(size: Theme.uiSize(9)))
-                                    .foregroundColor(e.isDir ? Theme.accent.opacity(0.7) : Theme.dim)
-                                Text(e.name).font(.system(size: Theme.uiSize(10.5), design: .monospaced))
-                                    .foregroundColor(Theme.text.opacity(0.9)).lineLimit(1)
-                                Spacer()
+                            HStack(spacing: 4) {
+                                if e.isDir {
+                                    Image(systemName: expanded.contains(e.path)
+                                          ? "chevron.down" : "chevron.right")
+                                        .font(.system(size: Theme.uiSize(7), weight: .semibold))
+                                        .foregroundColor(Theme.dim)
+                                        .frame(width: 10)
+                                    Image(systemName: expanded.contains(e.path)
+                                          ? "folder.fill" : "folder")
+                                        .font(.system(size: Theme.uiSize(9)))
+                                        .foregroundColor(Theme.accent.opacity(0.7))
+                                } else {
+                                    Spacer().frame(width: 10)
+                                    Image(systemName: "doc.text")
+                                        .font(.system(size: Theme.uiSize(9)))
+                                        .foregroundColor(Theme.dim)
+                                }
+                                Text(e.name)
+                                    .font(.system(size: Theme.uiSize(10.5), design: .monospaced))
+                                    .foregroundColor(selected == e.path
+                                                     ? Theme.accent : Theme.text.opacity(0.9))
+                                    .lineLimit(1)
+                                Spacer(minLength: 0)
                                 if !e.isDir && e.mtime > Date().addingTimeInterval(-900) {
-                                    Circle().fill(AgentStatus.concluido.color).frame(width: 5, height: 5)
-                                        .help("modificado ha pouco")
+                                    Circle().fill(AgentStatus.concluido.color)
+                                        .frame(width: 5, height: 5)
+                                        .help("modificado há pouco")
                                 }
                             }
-                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .padding(.leading, 6 + CGFloat(row.depth) * 12)
+                            .padding(.trailing, 6)
+                            .padding(.vertical, 2.5)
+                            .background(selected == e.path
+                                        ? Theme.accent.opacity(0.08) : .clear)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .help(e.isDir ? "clique para abrir a pasta aqui mesmo" : e.path)
                     }
                 }
             }
@@ -1490,7 +1571,7 @@ struct FileBrowser: View {
                 .font(.system(size: Theme.uiSize(8))).foregroundColor(Theme.dim)
         }
         .padding(10)
-        .frame(width: 220)
+        .frame(width: 230)
         .background(Theme.card.opacity(0.6))
     }
 }
@@ -1625,6 +1706,15 @@ struct AjustesView: View {
                                     }
                                 }
                                 Spacer()
+                                if !h.installed {
+                                    // um clique abre o Terminal ja com o comando rodando;
+                                    // depois e so voltar e recarregar
+                                    SmallButton(label: "instalar", icon: "arrow.down.circle",
+                                                tint: Theme.accent,
+                                                help: "abre o Terminal e roda: \(h.install). Depois de terminar (e fazer login, se a CLI pedir), volte e clique em recarregar") {
+                                        if let erro = openTerminal(h.install) { orch.lastError = erro }
+                                    }
+                                }
                             }
                             .padding(.horizontal, 10).padding(.vertical, 8)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2022,6 +2112,12 @@ struct NewAgentSheet: View {
                                 }
                             }
                             Spacer()
+                            if !h.installed {
+                                SmallButton(label: "instalar", icon: "arrow.down.circle",
+                                            help: "abre o Terminal e roda o comando de instalação") {
+                                    if let erro = openTerminal(h.install) { orch.lastError = erro }
+                                }
+                            }
                         }
                         .padding(.horizontal, 7).padding(.vertical, 4)
                         .background(cli == h.id ? Theme.accent.opacity(0.10) : .clear)

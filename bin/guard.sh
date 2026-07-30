@@ -93,6 +93,15 @@ printf '%s' "$cmd" | grep -Eq '(pkill|killall)\s+([^;&|]*\s)?tmux(\s|$)' \
 printf '%s' "$cmd" | grep -Eq '(^|[;&|`(]|\s)([^ ]*/)?nvo\s+(stop|limpar)(\s|$)' \
   && block "'nvo stop' e 'nvo limpar' sao do humano, nao do agente: derrubam o maestro e todos os agentes de uma vez. Para testar, use uma sessao propria: NVO_TMUX_SOCKET=teste nvo ..."
 
+# 6c-bis. trocar o projeto ativo do humano
+# 'nvo init' reescreve qual e o projeto ativo — o que o app abre quando sobe.
+# Um agente testando o motor init-ou num repositorio temporario e o painel do
+# humano abriu la, num /var/folders, sem os agentes dele. Quem precisa operar
+# outro projeto usa NVO_PROJECT=<caminho> na frente do comando: funciona igual
+# e nao mexe na escolha de quem esta olhando a tela.
+printf '%s' "$cmd" | grep -Eq '(^|[;&|`(]|\s)([^ ]*/)?nvo\s+init(\s|$)' \
+  && block "'nvo init' troca o projeto ativo do humano e faz o painel dele abrir em outro lugar. Para trabalhar noutro projeto use: NVO_PROJECT=/caminho nvo <comando>"
+
 # 6d. matar janela ou sessao de tmux no servidor da equipe
 # O agente vive numa janela; as dos colegas estao no mesmo servidor. Qualquer
 # kill aqui atinge quem esta trabalhando. Com -L apontando para outro socket

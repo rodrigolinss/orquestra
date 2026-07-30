@@ -448,10 +448,19 @@ final class Orchestra: ObservableObject {
     }
 
     // fixa a janela num projeto (escolha da pessoa ou adocao do ultimo usado)
+    // O app guarda o proprio ultimo projeto. O project.conf e compartilhado com
+    // o terminal e com os agentes — um deles rodando 'nvo init' num repo de
+    // teste ja fez o painel abrir num /var/folders vazio. A escolha de quem
+    // esta olhando a tela nao pode depender de um arquivo que outros escrevem.
+    static let chaveUltimoProjeto = "ultimoProjetoDoApp"
+
     func pin(_ path: String?) {
         pinned.map { Orchestra.abertos.remove($0) }
         pinned = path
-        path.map { Orchestra.abertos.insert($0) }
+        path.map {
+            Orchestra.abertos.insert($0)
+            UserDefaults.standard.set($0, forKey: Orchestra.chaveUltimoProjeto)
+        }
         objectWillChange.send()
     }
 
@@ -803,10 +812,14 @@ final class Orchestra: ObservableObject {
             self.ciclo &+= 1
             var repo = self.pinned
             if repo == nil, Orchestra.abertos.isEmpty {
-                // app recem-aberto: retoma o ultimo projeto e se fixa nele
-                let conf = "\(ORQ)/project.conf"
-                repo = (try? String(contentsOfFile: conf, encoding: .utf8))?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // app recem-aberto: retoma o projeto que o APP abriu por
+                // ultimo; o project.conf so entra se o app nunca escolheu um
+                repo = UserDefaults.standard.string(forKey: Orchestra.chaveUltimoProjeto)
+                if repo == nil || !FileManager.default.fileExists(atPath: repo!) {
+                    let conf = "\(ORQ)/project.conf"
+                    repo = (try? String(contentsOfFile: conf, encoding: .utf8))?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
                 if let r = repo, !r.isEmpty, FileManager.default.fileExists(atPath: r) {
                     DispatchQueue.main.sync { self.pin(r) }
                 } else {

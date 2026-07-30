@@ -71,6 +71,18 @@ printf '%s' "$cmd" | grep -Eq "git${GITFLAGS}\s+(checkout|switch)\s+(-[^ ]+\s+)*
 printf '%s' "$cmd" | grep -Eq '(curl|wget)[^;&|]*\|[^;&|]*\b(sh|bash|zsh)(\s|$)' \
   && block "pipe de download direto para shell nao e permitido"
 
+# 6b. derrubar o servidor de terminais inteiro
+# Um agente vive numa janela do tmux, e as janelas dos OUTROS agentes (e do
+# maestro) vivem no mesmo servidor. Matar o servidor mata a equipe toda de uma
+# vez: as sessoes de todos morrem no meio do trabalho, sem aviso e sem chance
+# de salvar contexto. Nenhuma tarefa legitima de agente precisa disto — quem
+# testa o motor cria a propria sessao e derruba SO ela, pelo nome.
+printf '%s' "$cmd" | grep -Eq 'tmux[^;&|]*\bkill-server(\s|$)' \
+  && block "tmux kill-server nao e permitido: derruba o maestro e todos os agentes de uma vez. Para limpar um teste, mate a sua sessao pelo nome (tmux kill-session -t <sua-sessao>)"
+
+printf '%s' "$cmd" | grep -Eq '(pkill|killall)\s+([^;&|]*\s)?tmux(\s|$)' \
+  && block "matar o processo do tmux nao e permitido: derruba o maestro e todos os agentes de uma vez"
+
 # 7. chmod 777
 printf '%s' "$cmd" | grep -Eq 'chmod\s+[^;&|]*777' \
   && block "chmod 777 nao e permitido"

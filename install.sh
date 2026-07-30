@@ -53,14 +53,19 @@ else
   # Pedir a senha do nada assusta, e no WSL confunde de verdade: a senha e a do
   # Linux que voce criou quando o Ubuntu abriu pela primeira vez, nao a do
   # Windows nem a da sua conta Microsoft. Dizemos isso ANTES de o prompt subir.
+  # Rodando como root (o caso do instalador de Windows) nao ha senha para pedir
+  # nem sudo para depender: chamamos o gerenciador direto.
+  SUDO="sudo"
+  [ "$(id -u)" = "0" ] && SUDO=""
   echo "-> falta instalar:$FALTANDO"
   case "$ORQ_PKG" in
     apt|dnf|pacman)
-      echo "   isso usa 'sudo', entao o sistema vai pedir a sua senha."
-      [ "$ORQ_OS" = "wsl" ] \
-        && echo "   no WSL e a SENHA DO LINUX (a que voce criou quando o Ubuntu abriu" \
-        && echo "   pela primeira vez) — nao e a senha do Windows."
-      [ "$ORQ_PKG" = "apt" ] && sudo apt-get update -qq || true
+      if [ -n "$SUDO" ]; then
+        echo "   isso usa 'sudo', entao o sistema vai pedir a sua senha."
+        [ "$ORQ_OS" = "wsl" ] \
+          && echo "   no WSL e a senha do Linux, nao a do Windows."
+      fi
+      [ "$ORQ_PKG" = "apt" ] && $SUDO apt-get update -qq || true
       ;;
   esac
   for pkg in $FALTANDO; do
@@ -74,8 +79,8 @@ if [ "$INSTALAR_TUDO" = 1 ] && [ "$ORQ_OS" != "macos" ]; then
   if ! command -v node >/dev/null 2>&1; then
     echo "-> instalando Node.js (o Claude Code precisa dele; o Ubuntu nao traz)"
     if [ "$ORQ_PKG" = "apt" ]; then
-      curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - >/dev/null 2>&1 \
-        && sudo apt-get install -y nodejs >/dev/null 2>&1 \
+      curl -fsSL https://deb.nodesource.com/setup_22.x | ${SUDO:+sudo -E} bash - >/dev/null 2>&1 \
+        && ${SUDO} apt-get install -y nodejs >/dev/null 2>&1 \
         && echo "   ok: node $(node --version 2>/dev/null)" \
         || echo "   aviso: falhou — instale manualmente: https://nodejs.org"
     else

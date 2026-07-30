@@ -40,11 +40,13 @@ orq_pkg_hint() {
 }
 
 orq_pkg_install() {
+  # como root nao ha senha a pedir, e a imagem pode nem ter sudo instalado
+  local S="sudo"; [ "$(id -u)" = "0" ] && S=""
   case "$ORQ_PKG" in
     brew)   brew install "$1" ;;
-    apt)    sudo apt-get install -y "$1" ;;
-    dnf)    sudo dnf install -y "$1" ;;
-    pacman) sudo pacman -S --noconfirm "$1" ;;
+    apt)    $S apt-get install -y "$1" ;;
+    dnf)    $S dnf install -y "$1" ;;
+    pacman) $S pacman -S --noconfirm "$1" ;;
     *)      return 1 ;;
   esac
 }

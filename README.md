@@ -72,7 +72,7 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 |---|---|---|
 | **macOS** | App nativo + CLI | Requer [Homebrew](https://brew.sh); o app compila se as Xcode Command Line Tools estiverem presentes |
 | **Linux** | CLI | Detecta `apt`, `dnf` ou `pacman` |
-| **Windows** | CLI, via **WSL2** | Não roda no Windows nativo — [dois comandos](#windows-dois-comandos), logo abaixo. Não use os dois de cima |
+| **Windows** | CLI, via **WSL2** | [Um comando no PowerShell](#windows-um-comando), logo abaixo — faz tudo sozinho. Não use os comandos de baixo |
 
 No macOS e no Linux:
 
@@ -81,43 +81,42 @@ git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
 cd ~/orquestra && ./install.sh
 ```
 
-### Windows — dois comandos
+### Windows — um comando
 
-**1.** No **PowerShell como administrador**, e depois reinicie:
+Abra o **PowerShell como administrador** (menu Iniciar → digite `PowerShell` → botão direito → *Executar como administrador*) e cole:
 
 ```powershell
-wsl --install
+irm https://raw.githubusercontent.com/rodrigolinss/orquestra/main/instalar-no-windows.ps1 | iex
 ```
 
-Ao voltar, o Ubuntu abre e pede para você **criar um usuário e uma senha do Linux** — são novos, não têm relação com a conta do Windows. Guarde a senha: é ela que o `sudo` pede.
+Pronto. Ele faz tudo sozinho: liga o WSL, instala o Ubuntu **sem criar usuário nem senha**, instala `git`, `tmux`, `jq`, Node.js, o Claude Code e o Orquestra, cria um atalho **Orquestra** no seu Desktop e roda o autoteste para provar que ficou funcionando.
 
-**2.** No terminal do Ubuntu (procure "Ubuntu" no menu Iniciar):
+Se o WSL ainda não estava ligado na sua máquina, ele avisa para reiniciar e você cola o mesmo comando de novo — da segunda vez termina sozinho.
+
+Depois, abra o atalho **Orquestra** no Desktop e:
 
 ```bash
-git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
-cd ~/orquestra && ./install.sh --tudo
+claude                       # uma vez, para fazer login (abre o navegador do Windows)
+nvo init ~/meu-projeto       # a pasta do seu código
+nvo maestro                  # o chefe: fale com ele em português
 ```
 
-O `--tudo` instala o que falta e não é nosso: `tmux`, `jq`, Node.js e o próprio Claude Code. Depois, `claude` uma vez para fazer login, `source ~/.bashrc`, e:
+#### Nada de usuário e senha do Linux
 
-```bash
-nvo autoteste     # prova o fluxo inteiro sem gastar token — 13 passos
-```
+O assistente do WSL normalmente pede para você criar um nome de usuário e uma senha de Linux. O instalador pula isso: ele usa `wsl --install --no-launch`, que instala a distribuição sem abrir o assistente de primeiro uso, e deixa o **root** como usuário padrão. Root no WSL não tem senha nem pede `sudo` — você nunca vê um prompt de login.
 
-Passou nos 13, está pronto.
-
-#### Por que preciso do Ubuntu se eu uso Windows?
+#### Por que ainda tem um Linux embaixo?
 
 Pergunta justa, e a resposta não é "porque o Claude Code exige" — ele **roda nativo no Windows**, direto no PowerShell.
 
-Quem exige é o Orquestra. Ele é feito de duas peças que não existem no Windows nativo:
+Quem precisa é o Orquestra. Ele é feito de duas peças que não existem no Windows nativo:
 
-- **bash** — os ~1.700 linhas do `nvo` são script de shell Unix;
-- **tmux** — é ele que mantém cada agente vivo numa janela própria, deixa a gente ler a tela sem interromper e continuar rodando depois que você fecha o terminal. O Windows não tem equivalente disso que dê para automatizar.
+- **bash** — as ~1.700 linhas do `nvo` são script de shell Unix;
+- **tmux** — é ele que mantém cada agente vivo numa janela própria, deixa ler a tela sem interromper o agente e continuar rodando depois que você fecha o terminal. O Windows não tem equivalente disso que dê para automatizar.
 
-O WSL2 não é "instalar outro sistema para cuidar": é um recurso do próprio Windows, um comando, e some da sua vista depois. Seus arquivos, seu VS Code e seu navegador continuam sendo os do Windows.
+O WSL2 não é "outro sistema para cuidar": é um recurso do próprio Windows, ligado por um comando, e some da sua vista depois. Seus arquivos, seu VS Code e seu navegador continuam sendo os do Windows.
 
-Uma versão nativa de Windows significaria reescrever o motor em PowerShell e trocar o tmux por uma camada de ConPTY — é um projeto, não um ajuste. Se isso for importante para você, [abra uma issue](https://github.com/rodrigolinss/orquestra/issues) dizendo; é o tipo de coisa que se decide pela demanda.
+Uma versão 100% nativa significaria reescrever o motor em PowerShell e trocar o tmux por uma camada de ConPTY — é um projeto, não um ajuste. Se isso for importante para você, [abra uma issue](https://github.com/rodrigolinss/orquestra/issues).
 
 #### O que muda no Windows
 

@@ -55,6 +55,33 @@ config_get() {
   printf '%s' "${valor:-$padrao}"
 }
 
+# --- Teto pela memoria da maquina -------------------------------------------
+# Cada agente e um Claude Code inteiro: node, servidor de linguagem, cache.
+# Na pratica ~1,5 GB cada quando esta pensando. Passar do que a RAM aguenta
+# nao deixa a equipe "mais lenta": o macOS comeca a matar processos, e ele nao
+# escolhe os menos importantes — leva o servidor tmux junto e a equipe inteira
+# morre no meio do trabalho. Aconteceu tres vezes num dia so.
+ram_gb() {
+  local bytes=""
+  if [ -r /proc/meminfo ]; then
+    bytes="$(awk '/^MemTotal:/ {print $2 * 1024; exit}' /proc/meminfo)"
+  else
+    bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+  fi
+  case "$bytes" in ''|*[!0-9]*) echo 8; return ;; esac
+  echo $(( bytes / 1073741824 ))
+}
+
+# 2 GB reservados para o sistema e o app; ~1,5 GB por agente. Numa maquina de
+# 8 GB da 4 — que e o que ela aguenta de verdade, nao o que da vontade.
+teto_por_ram() {
+  local gb n
+  gb="$(ram_gb)"
+  n=$(( (gb - 2) * 2 / 3 ))
+  [ "$n" -ge 1 ] || n=1
+  echo "$n"
+}
+
 NVO_MAX_DEPTH="${NVO_MAX_DEPTH:-$(config_get max_depth 2)}"
 NVO_MAX_FANOUT="${NVO_MAX_FANOUT:-$(config_get max_fanout 4)}"
 NVO_MAX_AGENTS="${NVO_MAX_AGENTS:-$(config_get max_agents 12)}"
@@ -390,6 +417,13 @@ cmd_new() {
   [ -n "$vivos" ] || vivos=0
   [ "$vivos" -lt "$NVO_MAX_AGENTS" ] || die \
     "ja existem $vivos agentes ativos (limite $NVO_MAX_AGENTS). Aprove ou descarte alguem antes de criar outro."
+
+  # Teto fisico, acima do configurado: a RAM da maquina nao e opiniao. Estourar
+  # aqui nao deixa a equipe lenta — faz o sistema matar processos no meio do
+  # trabalho, o servidor tmux inclusive, e a equipe inteira cai de uma vez.
+  local teto_ram; teto_ram="$(teto_por_ram)"
+  [ "$vivos" -lt "$teto_ram" ] || die \
+    "esta maquina tem $(ram_gb) GB de RAM e ja esta com $vivos agentes: mais um comeca a derrubar a equipe. Aprove ou descarte alguem antes (o teto fisico e $teto_ram; para mudar, NVO_MAX_AGENTS nao adianta, so mais memoria)."
 
   local wt base branch note meta
   wt="$(wt_path "$name")"

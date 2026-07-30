@@ -1,7 +1,7 @@
 // Orquestra.app — painel visual nativo do orquestrador nvo.
 // Maestro no topo, agentes conectados por cabos, notas como fonte de verdade.
-// O merge (nvo done) abre o Terminal de proposito: confirmacao digitada e
-// decisao humana, nunca um botao.
+// O merge (nvo done) exige o nome digitado na propria janela de aprovacao:
+// confirmacao digitada e decisao humana, nunca um botao.
 
 import SwiftUI
 import AppKit
@@ -303,7 +303,6 @@ final class Orchestra: ObservableObject {
     @Published var limites: [Limite] = []
 
     private var lastStatus: [String: AgentStatus] = [:]
-    private var lastAllDone = false
     @Published var quadro: String = ""
     @Published var limite: LimiteInfo?
     private var avisouEsgotado = false
@@ -654,13 +653,20 @@ final class Orchestra: ObservableObject {
                 self.processarPrompt(janela: "maestro", pane: maestro)
                 for a in list { self.processarPrompt(janela: a.name, pane: a.pane) }
                 // ciclo fechado: quando a EQUIPE INTEIRA conclui, o maestro e
-                // avisado uma unica vez e decide os proximos passos sozinho
+                // avisado uma unica vez por equipe. O aviso e chaveado por
+                // projeto + nomes dos agentes concluidos, e sobrevive ao
+                // relancamento do app — uma lista vazia por instante (refresh
+                // falho, app reaberto) nao pode reabrir a porta pro reenvio.
                 let allDone = !list.isEmpty && list.allSatisfy { $0.status == .concluido }
-                if allDone && !self.lastAllDone && running {
-                    self.sendMaestro("Todos os agentes concluíram. Leia as notas de cada um (nvo note <nome>), atualize o quadro (_quadro.md) em linguagem simples para o humano, e decida os próximos passos: propor novos agentes, pedir correções, ou me dizer o que está pronto para eu aprovar.")
-                    notifyMac("orquestra", "equipe concluiu — o maestro está consolidando o quadro")
+                if allDone && running {
+                    let assinatura = list.map { $0.name }.sorted().joined(separator: ",")
+                    let chave = "avisoEquipeConcluida.\(proj ?? "")"
+                    if UserDefaults.standard.string(forKey: chave) != assinatura {
+                        self.sendMaestro("A equipe terminou. Leia as notas de cada agente, atualize o quadro em linguagem simples e diga o que está pronto para eu aprovar.")
+                        notifyMac("orquestra", "equipe concluiu — o maestro está consolidando o quadro")
+                        UserDefaults.standard.set(assinatura, forKey: chave)
+                    }
                 }
-                self.lastAllDone = allDone
             }
         }
     }
@@ -936,15 +942,37 @@ final class UIScale: ObservableObject {
 struct TerminalText: View {
     let content: String
     var size: CGFloat = 10.5
+    var colorDiff: Bool = false
+
+    // linha de diff colorida por prefixo: + verde, - vermelho, @@ em destaque
+    private func diffColor(_ line: Substring) -> Color {
+        if line.hasPrefix("+") { return AgentStatus.concluido.color }
+        if line.hasPrefix("-") { return AgentStatus.bloqueado.color }
+        if line.hasPrefix("@@") { return Theme.accent }
+        return Theme.text.opacity(0.85)
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(content.isEmpty ? " " : content)
-                        .font(.system(size: Theme.uiSize(size), design: .monospaced))
-                        .foregroundColor(Theme.text.opacity(0.85))
+                    if colorDiff {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(content.split(separator: "\n", omittingEmptySubsequences: false).enumerated()), id: \.offset) { _, line in
+                                Text(String(line.isEmpty ? " " : line))
+                                    .font(.system(size: Theme.uiSize(size), design: .monospaced))
+                                    .foregroundColor(diffColor(line))
+                            }
+                        }
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text(content.isEmpty ? " " : content)
+                            .font(.system(size: Theme.uiSize(size), design: .monospaced))
+                            .foregroundColor(Theme.text.opacity(0.85))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(8)
@@ -2599,7 +2627,7 @@ struct DoneSheet: View {
                 .font(.system(size: Theme.uiSize(10))).foregroundColor(Theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
 
-            TerminalText(content: diff, size: 10.5)
+            TerminalText(content: diff, size: 10.5, colorDiff: true)
 
             HStack(spacing: 8) {
                 Text("digite \(name) para confirmar:")
@@ -2611,6 +2639,10 @@ struct DoneSheet: View {
                     .frame(width: 160)
                     .disabled(merging)
                     .onSubmit { aplicar() }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(confirm == name ? AgentStatus.concluido.color : Color.clear, lineWidth: 1.5)
+                    )
             }
             if let e = error {
                 Text(e).font(.system(size: Theme.uiSize(10), design: .monospaced))
@@ -2737,6 +2769,10 @@ struct KillSheet: View {
                 .font(.system(size: Theme.uiSize(11))).foregroundColor(Theme.dim)
             TextField(name, text: $confirm)
                 .textFieldStyle(.roundedBorder).font(.system(size: Theme.uiSize(12), design: .monospaced))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(confirm == name ? AgentStatus.concluido.color : Color.clear, lineWidth: 1.5)
+                )
             if let e = error {
                 Text(e).font(.system(size: Theme.uiSize(10))).foregroundColor(AgentStatus.bloqueado.color)
             }
@@ -3027,7 +3063,7 @@ struct HelpView: View {
                     row("person.3.fill", "3 · Acompanhe os agentes",
                         "Cada card mostra a tela ao vivo. Você recebe notificação do macOS quando alguém termina ou trava.")
                     row("checkmark.seal", "4 · Revise e aprove",
-                        "Terminou? Clique em diff pra ver o trabalho e em aprovar pra aplicar no projeto. A confirmação final é digitada no Terminal — merge nunca é automático.")
+                        "Terminou? Clique em diff pra ver o trabalho e em aprovar pra aplicar no projeto. A confirmação final é digitada ali mesmo, na janela de aprovação — merge nunca é automático.")
 
                     Divider().background(Theme.cardBorder)
                     Text("OS STATUS").font(.system(size: Theme.uiSize(9), weight: .black)).foregroundColor(Theme.accent)
@@ -3054,13 +3090,13 @@ struct HelpView: View {
                     Divider().background(Theme.cardBorder)
                     Text("DÚVIDAS FREQUENTES").font(.system(size: Theme.uiSize(9), weight: .black)).foregroundColor(Theme.accent)
                     row("questionmark.circle", "O maestro pode estragar meu projeto?",
-                        "Não. Cada agente trabalha numa cópia isolada (git worktree). Seu projeto original só muda quando você clica em aprovar e confirma no Terminal.")
+                        "Não. Cada agente trabalha numa cópia isolada (git worktree). Seu projeto original só muda quando você clica em aprovar e confirma digitando o nome do agente na janela de aprovação.")
                     row("questionmark.circle", "Fechei o app — perdi tudo?",
                         "Não. Os agentes continuam rodando no tmux em segundo plano. Reabra o app e está tudo lá.")
                     row("questionmark.circle", "Um agente travou, e agora?",
                         "Leia as notas dele (botão notas), destrave mandando uma instrução no campo do card — ou descarte e crie outro com uma tarefa mais específica.")
                     row("questionmark.circle", "Preciso saber git ou terminal?",
-                        "Quase nada: o único momento de terminal é a confirmação do aprovar, que já abre pronto — você só digita o nome do agente.")
+                        "Quase nada: aprovar é tudo dentro do app — você só digita o nome do agente na janela de aprovação para confirmar.")
 
                     Divider().background(Theme.cardBorder)
                     Text("SOBRE").font(.system(size: Theme.uiSize(9), weight: .black)).foregroundColor(Theme.accent)

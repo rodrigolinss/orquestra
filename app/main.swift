@@ -3535,45 +3535,47 @@ struct TextSheet: View {
     }
 }
 
+// Descartar tambem e um clique: o que protege aqui e a frase dizendo o que
+// sobrevive ao descarte, nao o nome ditado letra por letra.
 struct KillSheet: View {
     let name: String
     let orch: Orchestra
     @Environment(\.dismiss) var dismiss
-    @State private var confirm = ""
     @State private var error: String?
+    @State private var encerrando = false
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Encerrar agente sem merge").font(.system(size: Theme.uiSize(13), weight: .bold))
+            Text("Descartar \(name)").font(.system(size: Theme.uiSize(13), weight: .bold))
                 .foregroundColor(Theme.text)
-            Text("Remove a janela e o worktree de \"\(name)\". A branch agent/\(name) fica preservada. Digite o nome para confirmar:")
+            Text("O agente sai do painel e a cópia de trabalho dele é removida, sem aplicar nada no seu projeto.")
                 .font(.system(size: Theme.uiSize(11))).foregroundColor(Theme.dim)
-            TextField(name, text: $confirm)
-                .textFieldStyle(.roundedBorder).font(.system(size: Theme.uiSize(12), design: .monospaced))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(confirm == name ? AgentStatus.concluido.color : Color.clear, lineWidth: 1.5)
-                )
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "arrow.uturn.backward.circle")
+                    .font(.system(size: Theme.uiSize(11)))
+                    .foregroundColor(AgentStatus.concluido.color)
+                Text("O que ele já tinha salvo continua no git, na branch agent/\(name) — dá para recuperar depois.")
+                    .font(.system(size: Theme.uiSize(11))).foregroundColor(Theme.text.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.04)).cornerRadius(6)
             if let e = error {
                 Text(e).font(.system(size: Theme.uiSize(10))).foregroundColor(AgentStatus.bloqueado.color)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer()
                 SmallButton(label: "cancelar") { dismiss() }
-                SmallButton(label: "encerrar", icon: "xmark",
-                            tint: confirm == name ? AgentStatus.bloqueado.color : Theme.dim,
-                            help: confirm == name
-                                ? "encerra o agente \(name)"
-                                : "digite \(name) no campo acima para liberar") {
-                    // antes o clique com o nome errado nao fazia nada e nao
-                    // explicava nada — parecia botao quebrado
-                    guard confirm == name else {
-                        error = confirm.isEmpty
-                            ? "digite \(name) no campo acima para confirmar."
-                            : "o nome não confere — digite exatamente: \(name)"
-                        return
-                    }
+                SmallButton(label: encerrando ? "descartando…" : "descartar",
+                            icon: "xmark", tint: AgentStatus.bloqueado.color,
+                            help: "tira \(name) do painel sem aplicar nada no projeto") {
+                    guard !encerrando else { return }
+                    encerrando = true
                     error = nil
                     orch.killAgent(name) { err in
+                        encerrando = false
                         if let err = err {
                             error = err.isEmpty ? "o nvo falhou ao encerrar o agente." : err
                         } else { dismiss() }
@@ -3582,7 +3584,7 @@ struct KillSheet: View {
             }
         }
         .padding(18)
-        .frame(width: 420)
+        .frame(width: 440)
         .background(Theme.bg)
     }
 }

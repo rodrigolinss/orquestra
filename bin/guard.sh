@@ -83,6 +83,25 @@ printf '%s' "$cmd" | grep -Eq 'tmux[^;&|]*\bkill-server(\s|$)' \
 printf '%s' "$cmd" | grep -Eq '(pkill|killall)\s+([^;&|]*\s)?tmux(\s|$)' \
   && block "matar o processo do tmux nao e permitido: derruba o maestro e todos os agentes de uma vez"
 
+# 6c. comandos do orquestrador que derrubam a equipe inteira
+# 'nvo stop' e 'nvo limpar' sao decisoes do humano sobre a sessao dele: um
+# desliga maestro e todos os agentes, o outro zera o painel. Um agente que
+# testa o motor chama esses comandos com a melhor das intencoes e mata os
+# colegas que estavam no meio do trabalho — aconteceu duas vezes hoje. Quem
+# precisa testar isso de verdade sobe a propria sessao noutro socket, com
+# NVO_TMUX_SOCKET=teste, e la faz o que quiser.
+printf '%s' "$cmd" | grep -Eq '(^|[;&|`(]|\s)([^ ]*/)?nvo\s+(stop|limpar)(\s|$)' \
+  && block "'nvo stop' e 'nvo limpar' sao do humano, nao do agente: derrubam o maestro e todos os agentes de uma vez. Para testar, use uma sessao propria: NVO_TMUX_SOCKET=teste nvo ..."
+
+# 6d. matar janela ou sessao de tmux no servidor da equipe
+# O agente vive numa janela; as dos colegas estao no mesmo servidor. Qualquer
+# kill aqui atinge quem esta trabalhando. Com -L apontando para outro socket
+# (a sessao de teste do proprio agente) esta liberado.
+if printf '%s' "$cmd" | grep -Eq 'tmux[^;&|]*\bkill-(session|window|pane)(\s|$)'; then
+  printf '%s' "$cmd" | grep -Eq 'tmux\s+-L\s+[^ ]+' \
+    || block "matar janela ou sessao no servidor da equipe nao e permitido: os outros agentes vivem nele. Suba a sua sessao de teste noutro socket (tmux -L teste ...) e mate a sua la"
+fi
+
 # 7. chmod 777
 printf '%s' "$cmd" | grep -Eq 'chmod\s+[^;&|]*777' \
   && block "chmod 777 nao e permitido"

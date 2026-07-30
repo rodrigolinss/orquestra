@@ -837,6 +837,20 @@ struct StepCard: View {
 struct MaestroNode: View {
     @ObservedObject var orch: Orchestra
     @State private var draft = ""
+    @ObservedObject private var layout = AgentLayout.shared
+    @State private var dragging: CGSize? = nil
+    @State private var resizing: CGSize? = nil
+
+    private var box: AgentLayout.Box { layout.maestroBox }
+    private var liveX: CGFloat { box.x + (dragging?.width ?? 0) }
+    private var liveY: CGFloat { box.y + (dragging?.height ?? 0) }
+    private var liveW: CGFloat {
+        min(AgentLayout.maxW, max(AgentLayout.maestroMinW, box.w + (resizing?.width ?? 0)))
+    }
+    private var liveH: CGFloat {
+        min(AgentLayout.maxH, max(AgentLayout.maestroMinH, box.h + (resizing?.height ?? 0)))
+    }
+    private var active: Bool { dragging != nil || resizing != nil }
 
     private let examples: [(String, String)] = [
         ("👷 criar equipe", "cria um agente builder pra implementar [descreva a funcionalidade] e um agente reviewer pra auditar o trabalho dele. Me avisa quando os dois terminarem."),
@@ -847,6 +861,28 @@ struct MaestroNode: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: Theme.uiSize(11), weight: .bold))
+                    .foregroundColor(dragging != nil ? Theme.accent : Theme.dim.opacity(0.55))
+                    .padding(.horizontal, 3).padding(.vertical, 4)
+                    .contentShape(Rectangle())
+                    .help("arraste para mover o maestro · duplo clique volta ao lugar original")
+                    .onHover { $0 ? NSCursor.openHand.push() : NSCursor.pop() }
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { dragging = $0.translation }
+                            .onEnded { v in
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
+                                    layout.moveMaestro(by: v.translation)
+                                }
+                                dragging = nil
+                            }
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            layout.reset(AgentLayout.maestroKey)
+                        }
+                    }
                 Circle().fill(orch.maestroRunning ? Theme.accent : Theme.dim)
                     .frame(width: 8, height: 8)
                 Text("MAESTRO").font(.system(size: Theme.uiSize(12), weight: .bold, design: .monospaced))
@@ -867,10 +903,11 @@ struct MaestroNode: View {
                     if let erro = openTerminal("tmux attach -t orquestra") { orch.lastError = erro }
                 }
             }
+            // o terminal absorve o espaco extra: maestro maior mostra mais tela
             TerminalText(content: orch.maestroPane.isEmpty
                          ? "o terminal do maestro aparece aqui quando você iniciar"
                          : orch.maestroPane, size: 11)
-                .frame(height: 240)
+                .frame(minHeight: 120, maxHeight: .infinity)
             if orch.maestroRunning {
                 TerminalKeys(window: "maestro", pane: orch.maestroPane, orch: orch)
             }
@@ -898,10 +935,32 @@ struct MaestroNode: View {
             }
         }
         .padding(14)
+        .frame(width: liveW, height: liveH, alignment: .topLeading)
         .background(Theme.card)
         .cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.accent.opacity(0.35), lineWidth: 1))
-        .frame(maxWidth: 760)
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .stroke(active ? Theme.accent.opacity(0.7) : Theme.accent.opacity(0.35), lineWidth: 1))
+        .overlay(alignment: .bottomTrailing) {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: Theme.uiSize(8), weight: .bold))
+                .foregroundColor(resizing != nil ? Theme.accent : Theme.dim.opacity(0.5))
+                .padding(6)
+                .contentShape(Rectangle())
+                .help("arraste para redimensionar o maestro")
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                        .onChanged { resizing = $0.translation }
+                        .onEnded { v in
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
+                                layout.resizeMaestro(by: v.translation)
+                            }
+                            resizing = nil
+                        }
+                )
+        }
+        .shadow(color: .black.opacity(active ? 0.5 : 0), radius: active ? 16 : 0)
+        .offset(x: liveX, y: liveY)
+        .zIndex(active ? 10 : 0)
         .anchorPreference(key: NodeAnchors.self, value: .bottom) { ["maestro": $0] }
     }
 }
@@ -911,7 +970,9 @@ struct MaestroNode: View {
 // moveu ou redimensionou fica como deixou, inclusive depois de fechar o app.
 final class AgentLayout: ObservableObject {
     static let shared = AgentLayout()
-    private static let key = "ui.agentBoxes.v2"
+    // v3: o maestro entrou no canvas e as vagas mudaram de geometria; a chave
+    // nova descarta posicoes salvas no esquema antigo, que ficariam sobrepostas
+    private static let key = "ui.agentBoxes.v3"
 
     struct Box: Equatable {
         var x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat
@@ -925,6 +986,15 @@ final class AgentLayout: ObservableObject {
     static let maxH: CGFloat = 1400
     private static let gap: CGFloat = 28
     private static let cols = 3
+
+    // o maestro vive no mesmo canvas e tambem se move e redimensiona;
+    // "@" nao e valido em nome de agente, entao a chave nunca colide
+    static let maestroKey = "@maestro"
+    static let maestroDefault = Box(x: 190, y: 0, w: 760, h: 470)
+    static let maestroMinW: CGFloat = 480
+    static let maestroMinH: CGFloat = 300
+    // as vagas dos agentes comecam abaixo do maestro, com folga para os cabos
+    private static let agentsTop: CGFloat = maestroDefault.y + maestroDefault.h + 96
 
     @Published private(set) var boxes: [String: Box] = [:]
 
@@ -941,12 +1011,30 @@ final class AgentLayout: ObservableObject {
         UserDefaults.standard.set(raw, forKey: Self.key)
     }
 
-    // vaga natural: fileiras de 3, na ordem em que os agentes existem
+    // vaga natural: fileiras de 3 abaixo do maestro, na ordem dos agentes
     static func slot(_ index: Int) -> Box {
         let col = index % cols, row = index / cols
         return Box(x: CGFloat(col) * (defW + gap),
-                   y: CGFloat(row) * (defH + gap),
+                   y: agentsTop + CGFloat(row) * (defH + gap),
                    w: defW, h: defH)
+    }
+
+    var maestroBox: Box { boxes[Self.maestroKey] ?? Self.maestroDefault }
+
+    func moveMaestro(by d: CGSize) {
+        var b = maestroBox
+        b.x = max(0, b.x + d.width)
+        b.y = max(0, b.y + d.height)
+        boxes[Self.maestroKey] = b
+        persist()
+    }
+
+    func resizeMaestro(by d: CGSize) {
+        var b = maestroBox
+        b.w = min(Self.maxW, max(Self.maestroMinW, b.w + d.width))
+        b.h = min(Self.maxH, max(Self.maestroMinH, b.h + d.height))
+        boxes[Self.maestroKey] = b
+        persist()
     }
 
     func box(_ name: String, index: Int) -> Box {
@@ -983,7 +1071,9 @@ final class AgentLayout: ObservableObject {
 
     // area total que o canvas precisa ter para caber tudo que foi arrastado
     func canvasSize(names: [String]) -> CGSize {
-        var w: CGFloat = 1140, h: CGFloat = 480
+        let m = maestroBox
+        var w: CGFloat = max(1140, m.x + m.w + 60)
+        var h: CGFloat = max(560, m.y + m.h + 60)
         for (i, n) in names.enumerated() {
             let b = box(n, index: i)
             w = max(w, b.x + b.w + 60)
@@ -1036,12 +1126,18 @@ struct AgentNode: View {
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { dragging = $0.translation }
                             .onEnded { v in
-                                layout.move(agent.name, index: index, by: v.translation)
+                                // o spring so age no que o clamp corrigir: solto
+                                // dentro do canvas, assenta exatamente onde parou
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
+                                    layout.move(agent.name, index: index, by: v.translation)
+                                }
                                 dragging = nil
                             }
                     )
                     .onTapGesture(count: 2) {
-                        withAnimation(.easeOut(duration: 0.18)) { layout.reset(agent.name) }
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                            layout.reset(agent.name)
+                        }
                     }
                 Circle().fill(agent.status.color).frame(width: 7, height: 7)
                 Text(agent.name).font(.system(size: Theme.uiSize(12), weight: .bold, design: .monospaced))
@@ -1163,7 +1259,9 @@ struct AgentNode: View {
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
                         .onChanged { resizing = $0.translation }
                         .onEnded { v in
-                            layout.resize(agent.name, index: index, by: v.translation)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
+                                layout.resize(agent.name, index: index, by: v.translation)
+                            }
                             resizing = nil
                         }
                 )
@@ -2049,61 +2147,77 @@ struct ContentView: View {
                             orch.startMaestro()
                         }
                     }
-                    MaestroNode(orch: orch)
-                    if orch.agents.isEmpty {
-                        VStack(spacing: 6) {
+                    // canvas livre com origem fixa no canto superior esquerdo:
+                    // nada e centralizado, entao arrastar um card nunca desloca
+                    // os outros. Maestro e agentes vivem no mesmo plano.
+                    let canvas = layout.canvasSize(names: orch.agents.map { $0.name })
+                    ZStack(alignment: .topLeading) {
+                        MaestroNode(orch: orch)
+                        ForEach(Array(orch.agents.enumerated()), id: \.element.id) { idx, a in
+                            AgentNode(orch: orch, agent: a, index: idx,
+                                onNotes: { sheet = SheetTarget(name: a.name, kind: .notes) },
+                                onDiff: {
+                                    diffText = "carregando…"
+                                    sheet = SheetTarget(name: a.name, kind: .diff)
+                                    orch.diff(a.name) { diffText = $0 }
+                                },
+                                onKill: { sheet = SheetTarget(name: a.name, kind: .kill) },
+                                onDone: { sheet = SheetTarget(name: a.name, kind: .done) })
+                        }
+                        if orch.agents.isEmpty {
                             Text(orch.maestroRunning
                                  ? "3º passo: peça uma equipe ao maestro no campo acima — ou use os exemplos"
                                  : "os agentes que o maestro criar aparecem aqui, conectados a ele")
                                 .font(.system(size: Theme.uiSize(11), design: .monospaced))
                                 .foregroundColor(Theme.dim)
+                                .offset(x: layout.maestroBox.x,
+                                        y: layout.maestroBox.y + layout.maestroBox.h + 40)
                         }
-                        .padding(.bottom, 40)
-                    } else {
-                        // canvas livre: posicao absoluta por card, para arrastar
-                        // e redimensionar sem a grade puxar de volta
-                        let canvas = layout.canvasSize(names: orch.agents.map { $0.name })
-                        ZStack(alignment: .topLeading) {
-                            ForEach(Array(orch.agents.enumerated()), id: \.element.id) { idx, a in
-                                AgentNode(orch: orch, agent: a, index: idx,
-                                    onNotes: { sheet = SheetTarget(name: a.name, kind: .notes) },
-                                    onDiff: {
-                                        diffText = "carregando…"
-                                        sheet = SheetTarget(name: a.name, kind: .diff)
-                                        orch.diff(a.name) { diffText = $0 }
-                                    },
-                                    onKill: { sheet = SheetTarget(name: a.name, kind: .kill) },
-                                    onDone: { sheet = SheetTarget(name: a.name, kind: .done) })
+                    }
+                    .frame(width: canvas.width, height: canvas.height, alignment: .topLeading)
+                    // cabos desenhados ATRAS dos cards, resolvidos no espaco do
+                    // canvas: seguem cada card em tempo real durante o arraste
+                    .backgroundPreferenceValue(NodeAnchors.self) { anchors in
+                        GeometryReader { proxy in
+                            if let m = anchors["maestro"] {
+                                let mp = proxy[m]
+                                let ends = anchors
+                                    .filter { $0.key.hasPrefix("agent-") }
+                                    .sorted { $0.key < $1.key }
+                                    .map { proxy[$0.value] }
+                                ZStack(alignment: .topLeading) {
+                                    Path { p in
+                                        for ap in ends {
+                                            // fio com folga: o caimento cresce com a
+                                            // distancia, como um cabo real pendurado
+                                            let dx = ap.x - mp.x
+                                            let dy = ap.y - mp.y
+                                            let dist = (dx * dx + dy * dy).squareRoot()
+                                            let sag = max(26, min(150, dist * 0.22))
+                                            p.move(to: mp)
+                                            p.addCurve(to: ap,
+                                                control1: CGPoint(x: mp.x + dx * 0.12, y: mp.y + sag),
+                                                control2: CGPoint(x: ap.x - dx * 0.12, y: ap.y - sag * 0.35))
+                                        }
+                                    }
+                                    .stroke(Theme.cable, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                                    // conectores nas pontas, como plugues
+                                    Circle().fill(Theme.accent.opacity(0.6))
+                                        .frame(width: 6, height: 6).position(mp)
+                                    ForEach(Array(ends.enumerated()), id: \.offset) { _, ap in
+                                        Circle().fill(Theme.accent.opacity(0.6))
+                                            .frame(width: 6, height: 6).position(ap)
+                                    }
+                                }
                             }
                         }
-                        .frame(width: canvas.width, height: canvas.height, alignment: .topLeading)
+                        .allowsHitTesting(false)
                     }
                 }
                 .padding(.vertical, 32)
                 .padding(.horizontal, 24)
-                .frame(maxWidth: .infinity)
             }
             .background(Theme.bg)
-            .overlayPreferenceValue(NodeAnchors.self) { anchors in
-                GeometryReader { proxy in
-                    Path { p in
-                        guard let m = anchors["maestro"] else { return }
-                        let mp = proxy[m]
-                        for (key, a) in anchors where key.hasPrefix("agent-") {
-                            let ap = proxy[a]
-                            // curvatura proporcional a distancia: o cabo continua
-                            // elegante com o card perto ou espalhado no canvas
-                            let bend = max(40, min(220, abs(ap.y - mp.y) * 0.45))
-                            p.move(to: mp)
-                            p.addCurve(to: ap,
-                                       control1: CGPoint(x: mp.x, y: mp.y + bend),
-                                       control2: CGPoint(x: ap.x, y: ap.y - bend))
-                        }
-                    }
-                    .stroke(Theme.cable, style: StrokeStyle(lineWidth: 1.5))
-                }
-                .allowsHitTesting(false)
-            }
             if let f = openFile {
                 Divider().background(Theme.cardBorder)
                 FileViewer(path: f) { openFile = nil }

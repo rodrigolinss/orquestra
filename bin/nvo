@@ -1639,6 +1639,25 @@ cmd_doctor() {
     *)     chk AVISO "plataforma nao reconhecida ($(uname -s))" "o orquestra e testado em macOS, Linux e WSL2" ;;
   esac
 
+  # No WSL o PATH do Windows aparece dentro do Linux, entao um claude.exe ou um
+  # git.exe instalado no Windows e encontrado primeiro — e ele nao entende
+  # caminhos /home/... nem os worktrees que criamos aqui. Falha estranha e
+  # dificil de diagnosticar sozinho, entao apontamos o dedo direto.
+  if [ "$ORQ_OS" = "wsl" ]; then
+    local prog caminho
+    for prog in claude codex git tmux node; do
+      caminho="$(command -v "$prog" 2>/dev/null || true)"
+      case "$caminho" in
+        /mnt/[a-z]/*|*.exe)
+          chk AVISO "'$prog' esta vindo do Windows ($caminho)" \
+            "instale a versao do Linux dentro do WSL: ele nao entende caminhos /home/... e falha de formas estranhas" ;;
+      esac
+    done
+    command -v npm >/dev/null 2>&1 \
+      || chk AVISO "npm nao encontrado no WSL" \
+           "o Ubuntu do WSL vem sem Node: sudo apt-get install -y nodejs npm (ou use o nvm) — sem ele nao da para instalar o Claude Code aqui dentro"
+  fi
+
   command -v tmux >/dev/null 2>&1 \
     && chk OK "tmux $(tmux -V | awk '{print $2}')" \
     || chk FALTA "tmux nao encontrado" "$(orq_pkg_hint tmux)"

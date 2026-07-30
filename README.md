@@ -54,59 +54,125 @@ Rodar 3–4 agentes de IA em terminais soltos transforma você num roteador de c
 
 ## Recursos
 
-- **App nativo para macOS** — canvas visual com o maestro no topo e os cards dos agentes conectados abaixo dele. Status, saída do terminal, notas e diffs num relance.
+- **App nativo para macOS** — canvas visual com o maestro no topo e os cards dos agentes conectados abaixo dele. Status, saída do terminal, notas e diffs num relance. *No Linux e no Windows/WSL2 a interface é a CLI, que faz tudo o que o app faz.*
 - **Funciona com Claude Code e Codex** — escolha o harness por agente. Times mistos (builder no Claude + reviewer no Codex) funcionam de imediato.
 - **Instalação sem credenciais** — o instalador detecta o que você já tem. Claude/Codex já logados? Git já configurado? O Orquestra simplesmente aproveita.
 - **Pronto para GitHub** — abra uma pasta local ou cole `usuario/repo` e o Orquestra clona e registra. Repositórios privados funcionam com suas credenciais git existentes.
-- **Protocolo de notas compartilhadas** — os agentes reportam progresso, decisões e bloqueios em notas markdown. Quando um escreve `STATUS: CONCLUIDO` ou `BLOQUEADO`, você recebe uma notificação nativa do macOS.
-- **Inspetor de arquivos embutido** — uma barra lateral opcional (fechada por padrão) para navegar pelo worktree de qualquer agente e inspecionar arquivos modificados recentemente sem sair do app.
+- **Protocolo de notas compartilhadas** — os agentes reportam progresso, decisões e bloqueios em notas markdown. Quando um escreve `STATUS: CONCLUIDO` ou `BLOQUEADO`, o estado muda no `nvo ls` — e no macOS chega também uma notificação do sistema.
+- **Inspetor de arquivos embutido** (app do macOS) — uma barra lateral opcional (fechada por padrão) para navegar pelo worktree de qualquer agente e inspecionar arquivos modificados recentemente sem sair do app.
 - **Medição de tokens ao vivo** — uma faixa de status mostra a janela de sessão de 5 horas atual (tokens, valor equivalente em API, horário de reset), o total do dia e a distribuição por modelo. Também disponível como `nvo usage`.
 - **Escolha de modelo por agente** — rode trabalhadores em Sonnet ou Haiku por uma fração do custo do Opus, direto no diálogo de novo agente ou com `nvo new <nome> "<tarefa>" claude sonnet`.
 - **Nada para babá** — sem daemon, sem banco de dados. O estado é o sistema de arquivos; mate o tmux e nada se perde.
 
 ## Instalação
 
-**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos).
+**Requisitos:** pelo menos uma CLI de agente ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) ou [Codex](https://github.com/openai/codex)) instalada e logada, mais `git`, `tmux` e `jq` (o instalador cuida dos dois últimos). As CLIs de agente precisam de **Node.js** — no macOS ele costuma já estar lá; no Ubuntu do WSL2, não vem, e o [passo 3](#3-instalar-o-nodejs) resolve.
 
 | Plataforma | Interface | Observação |
 |---|---|---|
 | **macOS** | App nativo + CLI | Requer [Homebrew](https://brew.sh); o app compila se as Xcode Command Line Tools estiverem presentes |
 | **Linux** | CLI | Detecta `apt`, `dnf` ou `pacman` |
-| **Windows** | CLI, via **WSL2** | Instale dentro do WSL, não no Windows nativo — veja abaixo |
+| **Windows** | CLI, via **WSL2** | Não roda no Windows nativo. O [passo a passo completo](#windows-passo-a-passo-completo) está logo abaixo — siga por ele, não pelos dois comandos acima |
+
+No macOS e no Linux:
 
 ```bash
 git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
 cd ~/orquestra && ./install.sh
 ```
 
-<details>
-<summary><strong>Windows: passo a passo (WSL2)</strong></summary>
+### Windows — passo a passo completo
 
-O motor do Orquestra é bash + git + tmux, então roda nativamente dentro do WSL2 — o mesmo ambiente onde o Claude Code já funciona bem no Windows.
+O motor do Orquestra é bash + git + tmux, então ele roda **dentro do WSL2**, não no Windows nativo. Não existe PowerShell aqui: depois do passo 1, tudo acontece no terminal do Ubuntu.
+
+**O que você tem no Windows:** a CLI completa. **O que você não tem:** o app visual (ele é SwiftUI, exclusivo da Apple) e as notificações do sistema. O acompanhamento é pelo `nvo ls` e pelo `nvo attach`.
+
+#### 1. Instalar o WSL2
+
+No **PowerShell como administrador**:
 
 ```powershell
-# 1. no PowerShell (como administrador), instale o WSL2 e reinicie
 wsl --install
 ```
 
+Reinicie o computador. Ao voltar, o Ubuntu abre sozinho e pede para você **criar um usuário e uma senha do Linux** — são novos, não têm relação com a conta do Windows. Guarde a senha: ela é pedida em todo `sudo`.
+
+Daqui em diante, todos os comandos são no terminal do Ubuntu (procure por "Ubuntu" no menu Iniciar).
+
+#### 2. Instalar as dependências
+
 ```bash
-# 2. dentro do Ubuntu do WSL
-sudo apt-get update && sudo apt-get install -y git tmux jq
-
-# 3. instale o Claude Code DENTRO do WSL (não use o do Windows)
-npm install -g @anthropic-ai/claude-code
-claude          # faça login uma vez
-
-# 4. instale o Orquestra
-git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
-cd ~/orquestra && ./install.sh
+sudo apt-get update
+sudo apt-get install -y git tmux jq curl
 ```
 
-**A pegadinha principal:** o WSL enxerga o `PATH` do Windows, então um `claude.exe` instalado no Windows aparece no terminal do WSL — mas ele não entende caminhos `/home/...` e quebra. O `nvo doctor` detecta esse caso e avisa. Instale o Claude Code dentro do WSL.
+#### 3. Instalar o Node.js
 
-No Windows a interface é a CLI (o app visual usa SwiftUI, exclusivo da Apple). O `nvo ls` mostra o status de todos os agentes com cores, e o `nvo attach` abre a visão ao vivo no tmux. Uma UI multiplataforma em Tauri é um caminho aberto — abra uma issue se for útil pra você.
+O Ubuntu do WSL **vem sem Node**, e sem ele o passo 4 falha com `npm: command not found`:
 
-</details>
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node --version    # confirme que respondeu algo como v22.x
+```
+
+#### 4. Instalar o Claude Code dentro do WSL
+
+```bash
+npm install -g @anthropic-ai/claude-code
+claude          # faça login uma vez; abre o navegador do Windows
+```
+
+> **A pegadinha que mais derruba gente:** o WSL enxerga o `PATH` do Windows. Se você já tem o Claude Code instalado no Windows, o `claude.exe` dele aparece no terminal do Ubuntu e é encontrado primeiro — mas ele não entende caminhos `/home/...` e quebra de formas difíceis de entender. Instale a versão do Linux, aqui dentro. O `nvo doctor` detecta esse caso e avisa qual programa está vindo do lado errado.
+
+#### 5. Instalar o Orquestra
+
+```bash
+git clone https://github.com/rodrigolinss/orquestra.git ~/orquestra
+cd ~/orquestra && ./install.sh
+source ~/.bashrc      # ou abra um terminal novo
+nvo doctor            # deve terminar com "pronto para orquestrar."
+```
+
+#### 6. Onde deixar os seus projetos
+
+**Deixe os projetos dentro do Linux (`~/projetos/...`), não em `/mnt/c/...`.** O Orquestra cria uma cópia de trabalho isolada por agente (git worktree), e no disco do Windows visto pelo WSL isso fica lento a ponto de atrapalhar, além de embaralhar permissões de arquivo.
+
+Se o seu código já está no Windows, clone de novo do lado do Linux:
+
+```bash
+mkdir -p ~/projetos && cd ~/projetos
+git clone <url-do-seu-repo>
+nvo init ~/projetos/<seu-repo>
+```
+
+Para abrir esses arquivos no VS Code do Windows, use a extensão **WSL** e o comando `code .` de dentro do Ubuntu — ele abre a janela do Windows editando os arquivos do Linux, sem a perda de desempenho.
+
+#### 7. O dia a dia sem o app
+
+```bash
+nvo maestro                          # o chefe: fale com ele em português
+nvo ls                               # status de todos os agentes, colorido
+nvo attach                           # entra na visão ao vivo (tmux)
+nvo diff <nome>                      # o que o agente mudou
+nvo done <nome>                      # aprova: pede o nome digitado e faz o merge
+```
+
+Duas teclas do tmux que você vai usar: **`Ctrl-b` depois `d`** sai da visão ao vivo sem matar nada, e **`Ctrl-b` depois `n`** passa para a próxima janela. Fechar o terminal também não mata os agentes — eles seguem rodando, e o `nvo ls` mostra o estado quando você voltar.
+
+Se a máquina reiniciar ou o terminal cair, `nvo religar --todos` recria as janelas e manda cada agente continuar de onde parou.
+
+O diagnóstico no Windows termina assim (sem a linha do app, que é só do macOS):
+
+```
+nvo doctor — diagnostico do ambiente
+  ✓ plataforma: Windows via WSL2 (Ubuntu)
+  ✓ tmux 3.4
+  ✓ git 2.43 · identidade configurada
+  ✓ Claude Code instalado
+  ✓ hook de seguranca configurado
+pronto para orquestrar.
+```
 
 O instalador é idempotente e só preenche as lacunas: instala `tmux`/`jq` se faltarem, conecta o hook de segurança, adiciona a CLI ao seu `PATH` e compila o app nativo quando as Xcode Command Line Tools estão presentes. Ao final, faz um diagnóstico completo do ambiente:
 
@@ -123,17 +189,19 @@ pronto para orquestrar.
 
 ## Uso
 
-### O app
+### O app (macOS)
+
+No Linux e no Windows/WSL2, pule para [A CLI](#a-cli) — ela cobre todo o fluxo.
 
 Abra o **Orquestra** (Spotlight → "Orquestra"). Escolha um projeto — uma pasta local ou um repositório do GitHub — depois inicie o maestro e diga o que você quer:
 
 > *"cria um agente builder pra implementar o webhook de pagamento do docs/webhook.md, e um reviewer pra auditar. Me avisa quando os dois terminarem."*
 
-Cada agente aparece como um card ao vivo conectado ao maestro: status, saída do terminal, campo de prompt direto, notas e diff. Quando um agente termina ou trava, o macOS te notifica. Aprovar é um clique no próprio card — ver o diff e apertar "aplicar no projeto"; o merge acontece ali, sem precisar abrir o terminal.
+Cada agente aparece como um card ao vivo conectado ao maestro: status, saída do terminal, campo de prompt direto, notas e diff. Quando um agente termina ou trava, o macOS te notifica e um aviso aparece no painel. Aprovar é um clique no próprio card — ver o diff e apertar "aplicar no projeto"; o merge acontece ali, sem precisar abrir o terminal.
 
 ### A CLI
 
-A aprovação padrão é o clique no app; a CLI cobre isso e o resto, de forma scriptável — útil no Linux/WSL2, ou para quem prefere terminal:
+No macOS a aprovação padrão é o clique no app. A CLI cobre isso e todo o resto, de forma scriptável — e é a interface completa no Linux e no Windows/WSL2:
 
 ```bash
 nvo init ~/projetos/minha-api         # registra o projeto ativo
@@ -154,10 +222,16 @@ nvo status builder                    # situação do check e das colisões, em 
 nvo done builder                      # diff → nome digitado → merge --no-ff (alternativa ao clique no app)
 nvo kill reviewer                     # descarta sem merge (a branch é preservada)
 nvo attach                            # acompanha tudo ao vivo no tmux
+nvo clear maestro                     # o maestro esquece a conversa (economiza muito token)
+nvo religar --todos                   # terminal caiu? recria as janelas e retoma o contexto
+nvo projects                          # projetos já usados e quantos agentes vivos em cada
+nvo limpar                            # recomeço: maestro novo, quadro em branco, notas arquivadas
 nvo stop                              # encerra a sessão, preservando o trabalho
 nvo doctor                            # diagnóstico do ambiente
 nvo usage                             # consumo de tokens: janela de 5h, dia, modelos
 ```
+
+Vários projetos ao mesmo tempo funcionam: cada um tem a própria sessão tmux, os próprios agentes e as próprias notas, sem se enxergarem. No terminal, `NVO_PROJECT=/caminho/do/projeto nvo <comando>` opera num projeto sem trocar o ativo; no app do macOS, ⌘N abre outra aba já pedindo a pasta.
 
 ### Plano antes de executar
 

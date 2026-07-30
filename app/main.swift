@@ -869,19 +869,18 @@ struct MaestroNode: View {
     @ObservedObject var orch: Orchestra
     @State private var draft = ""
     @ObservedObject private var layout = AgentLayout.shared
-    @State private var dragging: CGSize? = nil
-    @State private var resizing: CGSize? = nil
+    @State private var dragging = false
+    @State private var resizing = false
+    // commit incremental a cada frame: nunca ha "soltar e voltar"
+    @State private var lastDrag: CGSize = .zero
+    @State private var lastResize: CGSize = .zero
 
     private var box: AgentLayout.Box { layout.maestroBox }
-    private var liveX: CGFloat { box.x + (dragging?.width ?? 0) }
-    private var liveY: CGFloat { box.y + (dragging?.height ?? 0) }
-    private var liveW: CGFloat {
-        min(AgentLayout.maxW, max(AgentLayout.maestroMinW, box.w + (resizing?.width ?? 0)))
-    }
-    private var liveH: CGFloat {
-        min(AgentLayout.maxH, max(AgentLayout.maestroMinH, box.h + (resizing?.height ?? 0)))
-    }
-    private var active: Bool { dragging != nil || resizing != nil }
+    private var liveX: CGFloat { box.x }
+    private var liveY: CGFloat { box.y }
+    private var liveW: CGFloat { box.w }
+    private var liveH: CGFloat { box.h }
+    private var active: Bool { dragging || resizing }
 
     private let examples: [(String, String)] = [
         ("👷 criar equipe", "cria um agente builder pra implementar [descreva a funcionalidade] e um agente reviewer pra auditar o trabalho dele. Me avisa quando os dois terminarem."),
@@ -894,19 +893,23 @@ struct MaestroNode: View {
             HStack {
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: Theme.uiSize(11), weight: .bold))
-                    .foregroundColor(dragging != nil ? Theme.accent : Theme.dim.opacity(0.55))
+                    .foregroundColor(dragging ? Theme.accent : Theme.dim.opacity(0.55))
                     .padding(.horizontal, 3).padding(.vertical, 4)
                     .contentShape(Rectangle())
                     .help("arraste para mover o maestro · duplo clique volta ao lugar original")
                     .onHover { $0 ? NSCursor.openHand.push() : NSCursor.pop() }
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { dragging = $0.translation }
-                            .onEnded { v in
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
-                                    layout.moveMaestro(by: v.translation)
-                                }
-                                dragging = nil
+                            .onChanged { v in
+                                layout.moveMaestro(by: CGSize(
+                                    width: v.translation.width - lastDrag.width,
+                                    height: v.translation.height - lastDrag.height))
+                                lastDrag = v.translation
+                                dragging = true
+                            }
+                            .onEnded { _ in
+                                lastDrag = .zero
+                                dragging = false
                             }
                     )
                     .onTapGesture(count: 2) {
@@ -974,27 +977,32 @@ struct MaestroNode: View {
         .overlay(alignment: .bottomTrailing) {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
                 .font(.system(size: Theme.uiSize(8), weight: .bold))
-                .foregroundColor(resizing != nil ? Theme.accent : Theme.dim.opacity(0.5))
+                .foregroundColor(resizing ? Theme.accent : Theme.dim.opacity(0.5))
                 .padding(6)
                 .contentShape(Rectangle())
                 .help("arraste para redimensionar o maestro")
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                        .onChanged { resizing = $0.translation }
-                        .onEnded { v in
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
-                                layout.resizeMaestro(by: v.translation)
-                            }
-                            resizing = nil
+                        .onChanged { v in
+                            layout.resizeMaestro(by: CGSize(
+                                width: v.translation.width - lastResize.width,
+                                height: v.translation.height - lastResize.height))
+                            lastResize = v.translation
+                            resizing = true
+                        }
+                        .onEnded { _ in
+                            lastResize = .zero
+                            resizing = false
                         }
                 )
         }
         .shadow(color: .black.opacity(active ? 0.5 : 0), radius: active ? 16 : 0)
-        // .position e layout de verdade (.offset e so visual): as ancoras dos
-        // cabos resolvem na posicao real e seguem o card durante o arraste
+        // a ancora vem ANTES do .position: assim ela pertence ao card (nao ao
+        // involucro que preenche o canvas) e resolve na posicao real dele,
+        // acompanhando o arraste frame a frame
+        .anchorPreference(key: NodeAnchors.self, value: .bottom) { ["maestro": $0] }
         .position(x: liveX + liveW / 2, y: liveY + liveH / 2)
         .zIndex(active ? 10 : 0)
-        .anchorPreference(key: NodeAnchors.self, value: .bottom) { ["maestro": $0] }
     }
 }
 
@@ -1126,22 +1134,20 @@ struct AgentNode: View {
     let onDone: () -> Void
     @State private var draft = ""
     @ObservedObject private var layout = AgentLayout.shared
-    @State private var dragging: CGSize? = nil
-    @State private var resizing: CGSize? = nil
+    @State private var dragging = false
+    @State private var resizing = false
+    // ultimo translation visto: o gesto e comitado INCREMENTALMENTE a cada
+    // frame (posicao ja salva em cada instante), entao nao existe "soltar e
+    // voltar" — mesmo que um re-render mate o gesto, o card fica onde esta
+    @State private var lastDrag: CGSize = .zero
+    @State private var lastResize: CGSize = .zero
 
     private var box: AgentLayout.Box { layout.box(agent.name, index: index) }
-
-    // durante o gesto o card segue o cursor direto (sem animacao, para nao
-    // criar atraso) e assenta no valor comitado ao soltar
-    private var liveX: CGFloat { box.x + (dragging?.width ?? 0) }
-    private var liveY: CGFloat { box.y + (dragging?.height ?? 0) }
-    private var liveW: CGFloat {
-        min(AgentLayout.maxW, max(AgentLayout.minW, box.w + (resizing?.width ?? 0)))
-    }
-    private var liveH: CGFloat {
-        min(AgentLayout.maxH, max(AgentLayout.minH, box.h + (resizing?.height ?? 0)))
-    }
-    private var active: Bool { dragging != nil || resizing != nil }
+    private var liveX: CGFloat { box.x }
+    private var liveY: CGFloat { box.y }
+    private var liveW: CGFloat { box.w }
+    private var liveH: CGFloat { box.h }
+    private var active: Bool { dragging || resizing }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -1150,21 +1156,23 @@ struct AgentNode: View {
                 // clique dos botoes nem a selecao de texto do terminal
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: Theme.uiSize(11), weight: .bold))
-                    .foregroundColor(dragging != nil ? Theme.accent : Theme.dim.opacity(0.55))
+                    .foregroundColor(dragging ? Theme.accent : Theme.dim.opacity(0.55))
                     .padding(.horizontal, 3).padding(.vertical, 4)
                     .contentShape(Rectangle())
                     .help("arraste para mover · duplo clique volta para o lugar original")
                     .onHover { $0 ? NSCursor.openHand.push() : NSCursor.pop() }
                     .highPriorityGesture(
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { dragging = $0.translation }
-                            .onEnded { v in
-                                // o spring so age no que o clamp corrigir: solto
-                                // dentro do canvas, assenta exatamente onde parou
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
-                                    layout.move(agent.name, index: index, by: v.translation)
-                                }
-                                dragging = nil
+                            .onChanged { v in
+                                layout.move(agent.name, index: index, by: CGSize(
+                                    width: v.translation.width - lastDrag.width,
+                                    height: v.translation.height - lastDrag.height))
+                                lastDrag = v.translation
+                                dragging = true
+                            }
+                            .onEnded { _ in
+                                lastDrag = .zero
+                                dragging = false
                             }
                     )
                     .onTapGesture(count: 2) {
@@ -1294,27 +1302,32 @@ struct AgentNode: View {
         .overlay(alignment: .bottomTrailing) {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
                 .font(.system(size: Theme.uiSize(8), weight: .bold))
-                .foregroundColor(resizing != nil ? Theme.accent : Theme.dim.opacity(0.5))
+                .foregroundColor(resizing ? Theme.accent : Theme.dim.opacity(0.5))
                 .padding(6)
                 .contentShape(Rectangle())
                 .help("arraste para redimensionar este card")
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                        .onChanged { resizing = $0.translation }
-                        .onEnded { v in
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
-                                layout.resize(agent.name, index: index, by: v.translation)
-                            }
-                            resizing = nil
+                        .onChanged { v in
+                            layout.resize(agent.name, index: index, by: CGSize(
+                                width: v.translation.width - lastResize.width,
+                                height: v.translation.height - lastResize.height))
+                            lastResize = v.translation
+                            resizing = true
+                        }
+                        .onEnded { _ in
+                            lastResize = .zero
+                            resizing = false
                         }
                 )
         }
         .shadow(color: .black.opacity(active ? 0.5 : 0), radius: active ? 16 : 0)
-        // .position e layout de verdade (.offset e so visual): as ancoras dos
-        // cabos resolvem na posicao real e seguem o card durante o arraste
+        // a ancora vem ANTES do .position: assim ela pertence ao card (nao ao
+        // involucro que preenche o canvas) e resolve na posicao real dele,
+        // acompanhando o arraste frame a frame
+        .anchorPreference(key: NodeAnchors.self, value: .top) { ["agent-\(agent.name)": $0] }
         .position(x: liveX + liveW / 2, y: liveY + liveH / 2)
         .zIndex(active ? 10 : 0)
-        .anchorPreference(key: NodeAnchors.self, value: .top) { ["agent-\(agent.name)": $0] }
     }
 }
 

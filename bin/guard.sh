@@ -3,6 +3,14 @@
 # Le o JSON do tool call no stdin, extrai o comando e bloqueia padroes
 # perigosos com exit 2 (mensagem no stderr vira feedback para o agente).
 # Camada deterministica: nao depende do modelo estar tendo um bom dia.
+#
+# Limitacoes conhecidas (isto casa TEXTO, nao executa nem interpreta shell):
+# - indirecao por variavel escapa (ex.: p=$HOME; rm -rf "$p") porque o guard
+#   nunca avalia a expansao, so olha a string do comando;
+# - ofuscacao via eval com payload em base64 (ou qualquer outra codificacao)
+#   nao e decodificada, entao passa incolume;
+# - so intercepta o tool Bash: escrita/edicao de arquivo via Write/Edit nao
+#   passa por este hook.
 
 set -u
 
@@ -18,13 +26,29 @@ block() {
   exit 2
 }
 
-# 1. rm com flags -r e -f (juntas ou separadas) mirando caminho absoluto ou ~
+# flags do git que tomam argumento antes do subcomando, forma separada por
+# espaco (a forma com "=" ja e coberta por -[^ ]+, que casa o token inteiro)
+GITFLAGS='(\s+(-C\s+[^ ]+|--git-dir\s+[^ ]+|--work-tree\s+[^ ]+|--namespace\s+[^ ]+|-[^ ]+))*'
+# variantes curtas (-r/-f, combinaveis com outras letras) ou longas do rm
+RM_R='(-[A-Za-z]*r[A-Za-z]*|--recursive)'
+RM_F='(-[A-Za-z]*f[A-Za-z]*|--force)'
+
+# 1. rm com flags -r e -f (curtas ou longas, juntas ou separadas) mirando
+#    caminho absoluto ou ~
 if printf '%s' "$cmd" | grep -Eq '(^|[;&|`(]|\s)rm\s'; then
-  if printf '%s' "$cmd" | grep -Eq 'rm\s+[^;&|]*-[A-Za-z]*r' \
-     && printf '%s' "$cmd" | grep -Eq 'rm\s+[^;&|]*-[A-Za-z]*f' \
+  if printf '%s' "$cmd" | grep -Eq "rm\s+[^;&|]*${RM_R}" \
+     && printf '%s' "$cmd" | grep -Eq "rm\s+[^;&|]*${RM_F}" \
      && printf '%s' "$cmd" | grep -Eq 'rm\s+[^;&|]*\s["'"'"']?(/|~|\$HOME)'; then
     block "rm -rf em caminho absoluto ou home"
   fi
+fi
+
+# 1b. cd para caminho perigoso encadeado com && seguido de rm -rf, mesmo que
+#     o alvo do rm seja um curinga (o caminho perigoso esta no cd, nao no rm)
+if printf '%s' "$cmd" | grep -Eq 'cd\s+["'"'"']?(/|~|\$HOME)([^;&|]*)?\s*&&' \
+   && printf '%s' "$cmd" | grep -Eq "rm\s+[^;&|]*${RM_R}" \
+   && printf '%s' "$cmd" | grep -Eq "rm\s+[^;&|]*${RM_F}"; then
+  block "cd para caminho perigoso encadeado com rm -rf"
 fi
 
 # 2. sudo
@@ -32,15 +56,15 @@ printf '%s' "$cmd" | grep -Eq '(^|[;&|`(]|\s)sudo(\s|$)' \
   && block "sudo nao e permitido"
 
 # 3. git push
-printf '%s' "$cmd" | grep -Eq 'git(\s+-[^ ]+)*\s+push(\s|$)' \
+printf '%s' "$cmd" | grep -Eq "git${GITFLAGS}\s+push(\s|\$)" \
   && block "git push nao e permitido; merge e decisao humana via nvo done"
 
 # 4. git reset --hard
-printf '%s' "$cmd" | grep -Eq 'git(\s+-[^ ]+)*\s+reset\s+[^;&|]*--hard' \
+printf '%s' "$cmd" | grep -Eq "git${GITFLAGS}\s+reset\s+[^;&|]*--hard" \
   && block "git reset --hard nao e permitido"
 
 # 5. checkout/switch para main ou master
-printf '%s' "$cmd" | grep -Eq 'git(\s+-[^ ]+)*\s+(checkout|switch)\s+(-[^ ]+\s+)*["'"'"']?(main|master)["'"'"']?(\s|$)' \
+printf '%s' "$cmd" | grep -Eq "git${GITFLAGS}\s+(checkout|switch)\s+(-[^ ]+\s+)*[\"']?(main|master)[\"']?(\s|\$)" \
   && block "trocar para main/master nao e permitido; agentes ficam na propria branch"
 
 # 6. curl/wget com pipe para sh/bash

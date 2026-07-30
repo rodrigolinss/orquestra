@@ -348,11 +348,12 @@ final class Orchestra: ObservableObject {
     // sabe qual e o dela — e o que impede uma aba de enxergar, tocar ou
     // derrubar os agentes da outra.
     private var pinned: String?
-    // Somente a PRIMEIRA janela da sessao adota o ultimo projeto usado, para
-    // voce voltar de onde parou. Janela nova nasce vazia e pede a pasta —
-    // nunca assume ~/orquestra nem herda o projeto da janela ao lado.
-    private let adotaUltimo: Bool
-    private static var primeiraJanela = true
+    // Uma janela adota o ultimo projeto usado quando NENHUMA outra janela esta
+    // com projeto aberto — ou seja, quando o app acabou de subir. Assim voce
+    // volta de onde parou, e a janela seguinte, aberta com o app ja em uso,
+    // nasce vazia pedindo a pasta. Contar "quem foi a primeira" nao funcionava:
+    // o SwiftUI constroi e descarta objetos de janela mais de uma vez, e a
+    // janela de verdade herdava a vez que a descartada tinha gasto.
 
     // o projeto vai para o nvo por variavel de ambiente, chamada a chamada
     private var nvoEnv: [String: String] {
@@ -364,6 +365,16 @@ final class Orchestra: ObservableObject {
         sh(NVO, args, stdin: stdin, env: nvoEnv)
     }
 
+    // Um comando que falha sem dizer nada vira uma tela que nao reage e uma
+    // pessoa achando que quebrou o proprio projeto. Se nao ha texto, dizemos
+    // pelo menos qual comando foi e o que fazer com a informacao.
+    private func erroDe(_ r: (code: Int32, out: String, err: String), _ comando: String) -> String {
+        let texto = (r.err + "\n" + r.out).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !texto.isEmpty { return texto }
+        return "o comando 'nvo \(comando)' falhou (código \(r.code)) sem explicar o motivo. "
+             + "Rode 'nvo \(comando)' no Terminal para ver o erro completo."
+    }
+
     // sessao tmux desta janela, derivada do nome da pasta do projeto
     var session: String {
         sessionName(pinned.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "sem-projeto")
@@ -371,7 +382,9 @@ final class Orchestra: ObservableObject {
 
     // fixa a janela num projeto (escolha da pessoa ou adocao do ultimo usado)
     func pin(_ path: String?) {
+        pinned.map { Orchestra.abertos.remove($0) }
         pinned = path
+        path.map { Orchestra.abertos.insert($0) }
         objectWillChange.send()
     }
 
@@ -592,9 +605,12 @@ final class Orchestra: ObservableObject {
         }
     }
 
+    // projetos que ja tem uma janela dona; ninguem adota o que ja esta aberto
+    private static var abertos: Set<String> = []
+
+    deinit { pinned.map { Orchestra.abertos.remove($0) } }
+
     init() {
-        adotaUltimo = Orchestra.primeiraJanela
-        Orchestra.primeiraJanela = false
         refreshHarnesses()
         refreshConfig()
         refresh()
@@ -701,14 +717,13 @@ final class Orchestra: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             var repo = self.pinned
-            if repo == nil, self.adotaUltimo {
-                // primeira janela: retoma o ultimo projeto e se fixa nele
+            if repo == nil, Orchestra.abertos.isEmpty {
+                // app recem-aberto: retoma o ultimo projeto e se fixa nele
                 let conf = "\(ORQ)/project.conf"
                 repo = (try? String(contentsOfFile: conf, encoding: .utf8))?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if let r = repo, !r.isEmpty, FileManager.default.fileExists(atPath: r) {
-                    self.pinned = r
-                    DispatchQueue.main.async { self.objectWillChange.send() }
+                    DispatchQueue.main.sync { self.pin(r) }
                 } else {
                     repo = nil
                 }
@@ -968,7 +983,7 @@ final class Orchestra: ObservableObject {
             let r = self.nvo(["init", path])
             DispatchQueue.main.async {
                 if r.code == 0 { self.pin(path) }
-                done(r.code == 0 ? nil : r.err)
+                done(r.code == 0 ? nil : self.erroDe(r, "init \(path)"))
                 self.refresh()
             }
         }

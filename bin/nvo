@@ -228,7 +228,12 @@ remember_project() {
   local repo="$1" tmp
   tmp="$(mktemp)"
   printf '%s\n' "$repo" > "$tmp"
-  [ -f "$PROJECTS" ] && grep -vxF "$repo" "$PROJECTS" >> "$tmp" 2>/dev/null
+  # o grep sai com 1 quando nao sobra nenhuma OUTRA linha — o caso comum de
+  # quem so usa um projeto. Sem o "|| true" isso derruba o script inteiro pelo
+  # set -e, e o init falha calado.
+  if [ -f "$PROJECTS" ]; then
+    grep -vxF "$repo" "$PROJECTS" >> "$tmp" 2>/dev/null || true
+  fi
   # so mantem o que ainda existe como repo git
   awk 'NF' "$tmp" | while IFS= read -r p; do
     [ -d "$p" ] && git -C "$p" rev-parse --git-dir >/dev/null 2>&1 && printf '%s\n' "$p"
